@@ -270,10 +270,9 @@ test "keys reach the windows: the equalizer opens and its presets cycle" {
     try testing.expectEqual(@as(?u8, 0), r.exit);
 }
 
-test "it keeps redrawing while playing, so the device is pulling frames" {
-    const gpa = testing.allocator;
+/// Bytes drawn over `window_ms` once the player has settled.
+fn drawRate(gpa: std.mem.Allocator, keys: []const u8, window_ms: u64) !usize {
     const io = testing.io;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeTone(tmp.dir, "tone.wav");
@@ -287,24 +286,41 @@ test "it keeps redrawing while playing, so the device is pulling frames" {
     });
     defer session.deinit();
 
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var settle: std.ArrayList(u8) = .empty;
+    defer settle.deinit(gpa);
+    try session.pump(&settle, gpa, 1500);
+    if (keys.len > 0) {
+        session.send(keys);
+        try session.pump(&settle, gpa, 500);
+    }
 
-    // Let it settle, then measure how much it draws over a fixed window.
-    try session.pump(&out, gpa, 1500);
-    const after_settle = out.items.len;
-    try session.pump(&out, gpa, 1500);
-    const after_playing = out.items.len;
+    var window: std.ArrayList(u8) = .empty;
+    defer window.deinit(gpa);
+    try session.pump(&window, gpa, window_ms);
 
     session.send("q");
-    try session.pump(&out, gpa, 600);
+    var tail: std.ArrayList(u8) = .empty;
+    defer tail.deinit(gpa);
+    try session.pump(&tail, gpa, 600);
+    _ = session.wait(3000);
 
-    // A player whose device never calls back would draw its first frame and
-    // then go quiet. The clock and the analyzer mean it never does.
-    try testing.expect(after_settle > 0);
-    try testing.expect(after_playing > after_settle);
+    return window.items.len;
+}
 
-    try testing.expectEqual(@as(?u8, 0), session.wait(3000));
+test "a playing track redraws far more than a stopped one" {
+    const gpa = testing.allocator;
+
+    // Comparative rather than a fixed threshold: a loaded CI runner slows
+    // both measurements equally, so the ratio holds where an absolute byte
+    // count would not.
+    //
+    // A stopped player is not silent on the wire — the analyzer decays, the
+    // colon blinks — so "more than nothing" proves nothing. Locally this is
+    // about 12.7kB playing against 3.0kB stopped over the same window.
+    const playing = try drawRate(gpa, "", 1500);
+    const stopped = try drawRate(gpa, "v", 1500);
+
+    try testing.expect(playing > stopped * 2);
 }
 
 test "usage and device listing exit with the right codes" {
