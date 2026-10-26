@@ -145,10 +145,17 @@ const Session = struct {
 const testing = std.testing;
 
 /// A playable file, so the player has something to open.
+///
+/// Long enough that it is still playing for the whole of any measurement
+/// window below. A short tone makes these tests measure a track that has
+/// already ended, which passes or fails depending on how fast the machine
+/// is — exactly the kind of flake CI should never have to diagnose.
+const tone_seconds: u32 = 12;
+
 fn writeTone(dir: std.Io.Dir, name: []const u8) !void {
     const gpa = testing.allocator;
     const rate: u32 = 48000;
-    const frames: u32 = rate * 2;
+    const frames: u32 = rate * tone_seconds;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -270,58 +277,34 @@ test "keys reach the windows: the equalizer opens and its presets cycle" {
     try testing.expectEqual(@as(?u8, 0), r.exit);
 }
 
-/// Bytes drawn over `window_ms` once the player has settled.
-fn drawRate(gpa: std.mem.Allocator, keys: []const u8, window_ms: u64) !usize {
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try writeTone(tmp.dir, "tone.wav");
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    const track = try std.fs.path.joinZ(gpa, &.{ root, "tone.wav" });
-    defer gpa.free(track);
-
-    var session = try Session.start(&.{
-        exe_path, "--null-audio", "--no-config", "--volume", "50", track.ptr,
-    });
-    defer session.deinit();
-
-    var settle: std.ArrayList(u8) = .empty;
-    defer settle.deinit(gpa);
-    try session.pump(&settle, gpa, 1500);
-    if (keys.len > 0) {
-        session.send(keys);
-        try session.pump(&settle, gpa, 500);
-    }
-
-    var window: std.ArrayList(u8) = .empty;
-    defer window.deinit(gpa);
-    try session.pump(&window, gpa, window_ms);
-
-    session.send("q");
-    var tail: std.ArrayList(u8) = .empty;
-    defer tail.deinit(gpa);
-    try session.pump(&tail, gpa, 600);
-    _ = session.wait(3000);
-
-    return window.items.len;
-}
-
-test "a playing track redraws far more than a stopped one" {
+test "the analyzer renders real audio, not just its baseline" {
     const gpa = testing.allocator;
+    const r = try runPlayer(gpa, "", 1200);
+    defer gpa.free(r.output);
 
-    // Comparative rather than a fixed threshold: a loaded CI runner slows
-    // both measurements equally, so the ratio holds where an absolute byte
-    // count would not.
-    //
-    // A stopped player is not silent on the wire — the analyzer decays, the
-    // colon blinks — so "more than nothing" proves nothing. Locally this is
-    // about 12.7kB playing against 3.0kB stopped over the same window.
-    const playing = try drawRate(gpa, "", 1500);
-    const stopped = try drawRate(gpa, "v", 1500);
-
-    try testing.expect(playing > stopped * 2);
+    // The analyzer's bar glyphs are U+2581..U+2588. At rest it draws only
+    // the U+2581 baseline, so anything taller is a bar that was driven by
+    // PCM arriving through the tap. Those codepoints appear nowhere else:
+    // the horizontal meters use U+258F..U+2589, and the sliders use U+2588.
+    const mid_bars = [_][]const u8{ "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}" };
+    var saw_bar = false;
+    for (mid_bars) |g| {
+        if (std.mem.indexOf(u8, r.output, g) != null) saw_bar = true;
+    }
+    try testing.expect(saw_bar);
+    try testing.expectEqual(@as(?u8, 0), r.exit);
 }
+
+// There is deliberately no test here comparing how much the player draws
+// while playing against while stopped. Under --null-audio miniaudio's null
+// device does not pace itself to the sample rate — it consumes frames as
+// fast as the decoder produces them, so a generated WAV is exhausted within
+// the first second no matter how long it is, and any rate comparison
+// measures decode speed rather than playback.
+//
+// That the device really pulls audio through the whole chain is proved
+// properly in src/audio/engine.zig, where the no-device engine's output is
+// read back and its level asserted.
 
 test "usage and device listing exit with the right codes" {
     const gpa = testing.allocator;
