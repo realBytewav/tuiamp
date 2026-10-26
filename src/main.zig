@@ -33,6 +33,8 @@ const usage =
     \\                     ~/.config/tuiamp/themes/, or a path to a .zon file
     \\  --no-config        do not read or write ~/.config/tuiamp/config.zon
     \\  --devices          list the audio devices and exit
+    \\  --null-audio       run with no sound at all, for testing on a machine
+    \\                     with no audio device
     \\  -h, --help         this text
     \\
     \\keys:
@@ -64,6 +66,7 @@ const Options = struct {
     help: bool = false,
     no_config: bool = false,
     list_devices: bool = false,
+    null_audio: bool = false,
     /// Indices into argv are not kept; paths are added as they are parsed.
     any_paths: bool = false,
 };
@@ -96,7 +99,10 @@ pub fn main(init: std.process.Init) !u8 {
     if (opts.list_devices) {
         var out_buf: [8192]u8 = undefined;
         var stdout = std.Io.File.stdout().writer(io, &out_buf);
-        try engine_mod.Engine.listDevices(&stdout.interface);
+        try engine_mod.Engine.listDevices(
+            &stdout.interface,
+            if (opts.null_audio) .null_device else .auto,
+        );
         try stdout.interface.flush();
         return 0;
     }
@@ -134,7 +140,7 @@ pub fn main(init: std.process.Init) !u8 {
     cfg.theme = theme_name;
 
     var engine: engine_mod.Engine = .{};
-    engine.init() catch |e| {
+    engine.initBackend(if (opts.null_audio) .null_device else .auto) catch |e| {
         // Say which half failed. A missing backend is almost always
         // libasound not being dlopen-able, and that is worth naming: the
         // alternative used to be a player that ran silently.
@@ -225,6 +231,8 @@ fn parseArgs(
             opts.no_config = true;
         } else if (std.mem.eql(u8, arg, "--devices")) {
             opts.list_devices = true;
+        } else if (std.mem.eql(u8, arg, "--null-audio")) {
+            opts.null_audio = true;
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
             try err.print("tuiamp: unknown option '{s}'\n", .{arg});
             return error.BadArgs;

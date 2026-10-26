@@ -119,16 +119,29 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 229 unit tests
+zig build test            # 229 unit + 6 end-to-end tests
+zig build test-unit       # just the unit tests
+zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries
 nix build .#tuiamp        # the packaged build
 ```
 
-The tests need no sound card: the audio path is checked by driving
-miniaudio's no-device engine and reading the node graph's output directly,
-which is the only way to see what a listener would actually hear — the
-visualizer taps the signal upstream of the master volume, so it cannot tell
-silence from sound.
+Nothing here needs a sound card.
+
+The **unit tests** check the audio path by driving miniaudio's no-device
+engine and reading the node graph's output directly. That is the only way
+to see what a listener would actually hear: the visualizer taps the signal
+*upstream* of the master volume, so it cannot tell silence from sound, and
+a build once shipped that advanced its clock and animated its analyzer
+while playing nothing at all.
+
+The **end-to-end tests** allocate a pseudo-terminal, exec the real binary on
+it, type at it, and assert on what it draws and how it exits — that the
+window appears, that keys reach it, that it keeps redrawing while playing,
+and that it hands the terminal back. They run against `--null-audio`, which
+selects miniaudio's null device. That device is reachable only when named
+explicitly, never as a fallback, so it can never become the reason your
+music is silent.
 
 ## Layout
 

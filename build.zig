@@ -74,7 +74,34 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
-    b.step("test", "Run unit tests").dependOn(&run_tests.step);
+
+    // End-to-end tests launch the real binary on a pseudo-terminal, so they
+    // need to know where it landed. Injecting the path this way also makes
+    // the test step depend on the executable being built.
+    const exe_path_opts = b.addOptions();
+    // addOptionPath yields a path relative to the build root, which only
+    // execs correctly if the test happens to run from there. Pass the root
+    // as well so the test can make it absolute.
+    exe_path_opts.addOptionPath("tuiamp_exe", exe.getEmittedBin());
+    exe_path_opts.addOption([]const u8, "build_root", b.build_root.path orelse ".");
+
+    const integration_mod = b.createModule(.{
+        .root_source_file = b.path("test/integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    integration_mod.addOptions("build_options", exe_path_opts);
+
+    const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    const run_integration = b.addRunArtifact(integration_tests);
+
+    const test_step = b.step("test", "Run unit and end-to-end tests");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_integration.step);
+
+    b.step("test-unit", "Run only the unit tests").dependOn(&run_tests.step);
+    b.step("test-e2e", "Run only the end-to-end tests").dependOn(&run_integration.step);
 }
 
 /// Where `libasound.so.2` lives on this machine, or "" if we cannot tell.

@@ -61,9 +61,28 @@ pub const Engine = struct {
         break :blk list;
     };
 
+    /// Which devices the engine is allowed to open.
+    pub const Backend = enum {
+        /// Any real backend, in miniaudio's priority order.
+        auto,
+        /// miniaudio's null device: consumes frames at the correct rate and
+        /// makes no sound. Only ever selected when asked for by name, so it
+        /// cannot become a silent fallback, but reachable so the interface
+        /// can be driven on a machine with no sound card.
+        null_device,
+    };
+
     pub fn init(self: *Engine) Error!void {
+        return self.initBackend(.auto);
+    }
+
+    pub fn initBackend(self: *Engine, backend: Backend) Error!void {
+        const list: []const c.ma_backend = switch (backend) {
+            .auto => &real_backends,
+            .null_device => &[_]c.ma_backend{c.ma_backend_null},
+        };
         try check(
-            c.ma_context_init(&real_backends, real_backends.len, null, &self.ctx),
+            c.ma_context_init(list.ptr, @intCast(list.len), null, &self.ctx),
             error.NoAudioBackend,
         );
         self.ctx_ready = true;
@@ -166,9 +185,13 @@ pub const Engine = struct {
 
     /// Print the backends and devices miniaudio can see, and which one would
     /// be chosen. Diagnostic for machines with several sound cards.
-    pub fn listDevices(w: *std.Io.Writer) !void {
+    pub fn listDevices(w: *std.Io.Writer, backend: Backend) !void {
+        const list: []const c.ma_backend = switch (backend) {
+            .auto => &real_backends,
+            .null_device => &[_]c.ma_backend{c.ma_backend_null},
+        };
         var ctx: c.ma_context = undefined;
-        if (c.ma_context_init(&real_backends, real_backends.len, null, &ctx) != c.MA_SUCCESS) {
+        if (c.ma_context_init(list.ptr, @intCast(list.len), null, &ctx) != c.MA_SUCCESS) {
             try w.writeAll("no usable audio backend\n");
             try w.writeAll("  (on Linux this usually means libasound.so.2 could not be\n");
             try w.writeAll("   dlopened: check LD_LIBRARY_PATH)\n");
