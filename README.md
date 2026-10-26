@@ -9,7 +9,7 @@ with a retro colour scheme. The main window, equalizer and playlist editor
 are three stacked windows you show, hide and collapse independently, with the
 widgets in their real Winamp positions.
 
-![tuiamp playing a 1,457-track library, with the equalizer and playlist open](docs/screenshot.png)
+![tuiamp playing a 1,457-track library: transport and analyzer, the ten-band equalizer, and the playlist](docs/demo.gif)
 
 ## Requirements
 
