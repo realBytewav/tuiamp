@@ -1,0 +1,63 @@
+// tuiamp theme — the classic palette with no characters above U+007F, for
+// terminals or fonts where block and box drawing cannot be trusted.
+.{
+    .name = "ascii",
+
+    .bg = 0x1c1c20,
+    .frame = 0x3f3f46,
+    .frame_focus = 0x6e6e78,
+    .title_bg = 0x2b2b33,
+    .title_fg = 0x00e000,
+    .title_fg_dim = 0x4a7a4a,
+
+    .lcd_bg = 0x000000,
+    .lcd_fg = 0x00ff00,
+    .lcd_dim = 0x006000,
+
+    .text = 0x00d000,
+    .text_dim = 0x3f7f3f,
+    .text_bright = 0xc8ffc8,
+
+    .list_current = 0xffffff,
+    .list_sel_bg = 0x0000c6,
+    .list_sel_fg = 0xffffff,
+
+    .track = 0x37373f,
+    .fill = 0x00a000,
+    .thumb = 0xc8ffc8,
+    .button = 0x9a9aa4,
+    .button_active = 0xffffff,
+
+    .vis_lo = 0x00ff00,
+    .vis_mid = 0xffff00,
+    .vis_hi = 0xff2000,
+    .vis_peak = 0xc8c8c8,
+
+    .glyphs = .{
+        .bars = .{ " ", ".", ".", ":", ":", "|", "|", "#", "#" },
+        .hbars = .{ " ", " ", ".", ".", "-", "-", "=", "=", "#" },
+        .h = "-",
+        .v = "|",
+        .tl = "+",
+        .tr = "+",
+        .bl = "+",
+        .br = "+",
+        .track = "-",
+        .thumb = "#",
+        .peak = "_",
+        .scope = "#",
+        .scope_hi = "-",
+        .scope_lo = "_",
+        .colon = ":",
+        .win_shade = "_",
+        .win_close = "x",
+        .sep = " *** ",
+        .now_playing = ">",
+        .prev = "|<<",
+        .play = " > ",
+        .pause = " ||",
+        .stop = "[ ]",
+        .next = ">>|",
+        .eject = " ^ ",
+    },
+}

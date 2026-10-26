@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: zig build test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          # tuiamp tracks a specific Zig release: 0.16 moved std.fs.File to
+          # std.Io.File, so neither older nor newer compilers will build it.
+          version: 0.16.0
+
+      - name: Check formatting
+        run: zig fmt --check build.zig src
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        # The audio tests drive miniaudio's no-device engine and read the
+        # node graph's output directly, so they need no sound card and no
+        # ALSA library on the runner.
+        run: zig build test --summary all
+
+      - name: Build release
+        run: zig build -Doptimize=ReleaseFast
+
+  nix:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+      - run: nix build .#tuiamp --print-build-logs
+      - run: nix flake check
