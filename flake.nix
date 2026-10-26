@@ -5,7 +5,12 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      # Linux only, and honestly so: the terminal layer uses signalfd for
+      # SIGWINCH and raw linux.ioctl for the window size, neither of which
+      # exists on macOS or the BSDs. Porting is a contained job — one file
+      # and one function — but it has not been done, and claiming otherwise
+      # just wastes a stranger's afternoon.
+      systems = [ "x86_64-linux" "aarch64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
     in {
       packages = forAll (pkgs: rec {
@@ -50,7 +55,7 @@
             homepage = "https://github.com/realBytewav/tuiamp";
             license = licenses.mit;
             mainProgram = "tuiamp";
-            platforms = platforms.unix;
+            platforms = platforms.linux;
           };
         };
       });

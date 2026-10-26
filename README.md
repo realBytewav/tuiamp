@@ -9,46 +9,25 @@ with a retro colour scheme. The main window, equalizer and playlist editor
 are three stacked windows you show, hide and collapse independently, with the
 widgets in their real Winamp positions.
 
-```
-┌─ tuiamp ─────────────────────────── 1/18 ────────────────────────────── ▁ ✕  ┐
-│                                                                              │
-│  ┌─┐┌─┐▪┌─┐╷ ╷     ▶  Gorillaz - Re-Hash                                     │
-│  │ ││ │ │ │└─┤                                                               │
-│  └─┘└─┘▪└─┘  ╵     138 kbps     48 kHz     stereo                            │
-│                                                                              │
-│  ▁███▁▁█▁▁       ▁▁▁▁▁▁▁▁▁▁     vol █▊                    bal ─────█─────    │
-│  ████████▄▁▁▁▁▁ ▁ ▄▇████▆▄▆                                                  │
-│  █████████     ▁▄██████████                                                  │
-│  █████████▇▆▃▁▄▂███████████                                  [EQ]    [PL]    │
-│                                                                              │
-│  ─█────────────────────────────────────────────────────────────────────────  │
-│                                                                              │
-│   |◀◀    ▶     ❚❚    ■    ▶▶|    ⏏             shuffle    repeat             │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-┌─ Equalizer ──────────────────────────────────────────────────────────── ▁ ✕  ┐
-│ [ ON ]  [ auto ]   preset: Rock                                              │
-│                                                                              │
-│ +12  │││    ███  │││  │││  │││  │││  │││  ███  ███  ███  ███                 │
-│      │││    ███  ▄▄▄  │││  │││  │││  ▄▄▄  ███  ███  ███  ███                 │
-│      │││    ███  ███  │││  │││  │││  ███  ███  ███  ███  ███                 │
-│      │││    ███  ███  │││  │││  │││  ███  ███  ███  ███  ███                 │
-│   0  ▄▄▄    ███  ███  ▄▄▄  ▄▄▄  ▄▄▄  ███  ███  ███  ███  ███                 │
-│      │││    │││  │││  ███  ███  ███  │││  │││  │││  │││  │││                 │
-│      │││    │││  │││  ███  ███  ███  │││  │││  │││  │││  │││                 │
-│      │││    │││  │││  ███  ███  │││  │││  │││  │││  │││  │││                 │
-│ -12  │││    │││  │││  │││  ███  │││  │││  │││  │││  │││  │││                 │
-│      pre    60   170  310  600  1k   3k   6k   12k  14k  16k                 │
-└──────────────────────────────────────────────────────────────────────────────┘
-┌─ Playlist ───────────────────────────────────────────────────────────── ▁ ✕  ┐
-│▶ 1. Gorillaz - Re-Hash                                                  3:41 │
-│  2. Gorillaz - 5/4                                                      2:42 │
-│  3. Gorillaz - Tomorrow Comes Today                                     3:14 │
-│  4. Gorillaz - New Genius (Brother)                                     4:00 │
-│  5. Gorillaz - Clint Eastwood                                           5:41 │
-│ 18 tracks                                                            1:08:12 │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+![tuiamp playing a 1,457-track library, with the equalizer and playlist open](docs/screenshot.png)
+
+## Requirements
+
+- **Linux**, on glibc or musl, x86_64 or aarch64 — all four combinations are
+  verified by cross-compiling, and CI builds and tests on stock Ubuntu.
+  macOS and Windows do not build: the terminal layer uses `signalfd` for
+  SIGWINCH and a raw `ioctl` for the window size, and Windows additionally
+  needs a different `std.process.Args` path. The Linux-specific parts are
+  confined to `src/term/tty.zig` and one function in `src/ui/app.zig`, so a
+  port is a contained job if you fancy it.
+- **A truecolor terminal.** Colours are emitted as 24-bit SGR with no
+  256-colour fallback, so on an older terminal they will be wrong. Inside
+  tmux you want `set -as terminal-features ",*:RGB"`.
+- **Zig 0.16.0 exactly**, to build from source. 0.16 moved `std.fs.File` to
+  `std.Io.File`, so neither 0.15 nor 0.17 will work.
+- **A font with box-drawing and block glyphs**, or `--theme ascii`.
+- 80x16 cells for the full layout; it falls back to a one-line windowshade
+  below that.
 
 ## Running it
 

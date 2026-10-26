@@ -116,7 +116,12 @@ fn addMiniaudio(b: *std.Build, mod: *std.Build.Module) void {
     });
     // miniaudio resolves the ALSA/PulseAudio backends with dlopen at runtime,
     // so there is no build-time dependency on their headers or shared objects.
-    mod.linkSystemLibrary("dl", .{});
+    // `dl` and `pthread` are POSIX names with no Windows equivalent — libc
+    // provides both there — so asking for them breaks a Windows build before
+    // it reaches anything interesting.
     mod.linkSystemLibrary("m", .{});
-    mod.linkSystemLibrary("pthread", .{});
+    if (mod.resolved_target.?.result.os.tag != .windows) {
+        mod.linkSystemLibrary("dl", .{});
+        mod.linkSystemLibrary("pthread", .{});
+    }
 }
