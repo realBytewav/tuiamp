@@ -97,7 +97,8 @@ pub const App = struct {
     eq_cursor: usize = 0,
     playlist_open: bool = false,
     playlist_scroll: usize = 0,
-    help_open: bool = false,
+    /// Null when the overlay is closed; `?` walks the pages and then closes.
+    help_page: ?help.Page = null,
     drag: Drag = .none,
     frames: u32 = 0,
 
@@ -439,7 +440,7 @@ pub const App = struct {
         switch (key) {
             .char => |ch| switch (ch) {
                 'q' => a.quit = true,
-                '?' => a.help_open = !a.help_open,
+                '?' => a.cycleHelp(),
                 // The transport row, left to right.
                 'z' => a.step(.backward),
                 'x' => p.play() catch {},
@@ -470,11 +471,11 @@ pub const App = struct {
             .page_down => p.seekBy(-30),
             .home => p.seekSeconds(0),
             .f => |n| if (n == 1) {
-                a.help_open = !a.help_open;
+                a.cycleHelp();
             },
             // Escape closes the help if it is up, and otherwise quits.
-            .escape => if (a.help_open) {
-                a.help_open = false;
+            .escape => if (a.help_page != null) {
+                a.help_page = null;
             } else {
                 a.quit = true;
             },
@@ -540,6 +541,13 @@ pub const App = struct {
     }
 
     /// Cycle through the windows that are actually open.
+    /// Closed, then keys, then what it does, then closed again. One key for
+    /// the whole overlay keeps it discoverable: there is nothing else to
+    /// learn once you have found `?`.
+    fn cycleHelp(a: *App) void {
+        a.help_page = if (a.help_page) |page| page.next() else .keys;
+    }
+
     fn cycleFocus(a: *App) void {
         const order = [_]Focus{ .main, .eq, .playlist };
         const current = for (order, 0..) |f, i| {
@@ -956,8 +964,8 @@ pub const App = struct {
         }
 
         // Last, so it sits over every window: that is what an overlay is.
-        if (a.help_open) {
-            help.draw(a.screen.painter(help.rect(a.screen.bounds())), a.theme);
+        if (a.help_page) |page| {
+            help.draw(a.screen.painter(help.rect(a.screen.bounds())), a.theme, page);
         }
     }
 
