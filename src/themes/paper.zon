@@ -1,0 +1,39 @@
+// tuiamp theme — ink on paper, for a light terminal.
+//
+// The only light theme that ships, and the one place the palette's names
+// read backwards: `text_bright` is the *darkest* ink, because on paper
+// prominence comes from weight rather than glow. The LCD panel is a shade
+// darker than the page instead of lighter, so it still reads as recessed.
+.{
+    .name = "paper",
+
+    .bg = 0xf4f1e8,
+    .frame = 0xc8c0ae,
+    .frame_focus = 0x8a7f66,
+    .title_bg = 0xe8e3d5,
+    .title_fg = 0x8a4b1f,
+    .title_fg_dim = 0xb09a7a,
+
+    .lcd_bg = 0xe4dfcf,
+    .lcd_fg = 0x4a3c22,
+    .lcd_dim = 0xa89a7c,
+
+    .text = 0x3a3428,
+    .text_dim = 0x8a8068,
+    .text_bright = 0x14110a,
+
+    .list_current = 0x8a4b1f,
+    .list_sel_bg = 0x3a5a8a,
+    .list_sel_fg = 0xf8f6f0,
+
+    .track = 0xd8d2c0,
+    .fill = 0x6a8a4a,
+    .thumb = 0x2a2418,
+    .button = 0x5a5240,
+    .button_active = 0x14110a,
+
+    .vis_lo = 0x4a7a3a,
+    .vis_mid = 0xc08a20,
+    .vis_hi = 0xb03a20,
+    .vis_peak = 0x2a2418,
+}

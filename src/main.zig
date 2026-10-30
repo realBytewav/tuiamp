@@ -22,15 +22,26 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.f);
 
-const usage =
+/// The built-in theme names, comma-separated, built from `Theme.builtins` so
+/// `--help` cannot drift from what actually ships.
+const theme_list = blk: {
+    var out: []const u8 = "";
+    for (Theme.builtins, 0..) |t, i| {
+        out = out ++ (if (i == 0) "" else ", ") ++ t.name;
+    }
+    break :blk out;
+};
+
+const usage = std.fmt.comptimePrint(
     \\tuiamp — Winamp, but the "win" is a TUI
     \\
     \\usage: tuiamp [options] <file|directory|playlist>...
     \\
     \\options:
     \\  --volume <0-100>   starting volume (overrides the saved one)
-    \\  --theme <name>     classic, ascii, a name under
-    \\                     ~/.config/tuiamp/themes/, or a path to a .zon file
+    \\  --theme <name>     {s},
+    \\                     a name under ~/.config/tuiamp/themes/, or a path
+    \\                     to a .zon file
     \\  --no-config        do not read or write ~/.config/tuiamp/config.zon
     \\  --devices          list the audio devices and exit
     \\  --null-audio       run with no sound at all, for testing on a machine
@@ -56,9 +67,10 @@ const usage =
     \\
     \\mouse: drag the seek, volume, balance and equalizer sliders; click the
     \\       transport buttons; double-click a playlist row to play it; the
-    \\       wheel sets volume, or scrolls the playlist.
+    \\       wheel sets volume, or scrolls the playlist. The ? in the titlebar
+    \\       opens the same help the ? key does.
     \\
-;
+, .{theme_list});
 
 const Options = struct {
     /// Null means "whatever the config file says".

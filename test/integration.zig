@@ -552,7 +552,7 @@ test "the scrollbar thumb sits where the view is" {
 /// so a test can assert on a dialog that is still open. The teardown sends
 /// escape first, because a modal dialog deliberately swallows `q` — a stray
 /// keypress while picking a theme should not close the player.
-fn runPlayerModal(gpa: std.mem.Allocator, keys: []const u8) !struct {
+fn runPlayerModal(gpa: std.mem.Allocator, theme: [*:0]const u8, keys: []const u8) !struct {
     output: []u8,
     exit: ?u8,
 } {
@@ -572,6 +572,8 @@ fn runPlayerModal(gpa: std.mem.Allocator, keys: []const u8) !struct {
         "--no-config",
         "--volume",
         "50",
+        "--theme",
+        theme,
         track.ptr,
     });
     defer session.deinit();
@@ -596,11 +598,12 @@ fn runPlayerModal(gpa: std.mem.Allocator, keys: []const u8) !struct {
 
 /// Ctrl+P, as a terminal sends it.
 const ctrl_p = "\x10";
-const arrow_up = "\x1b[A";
+/// `end`, which selects the last theme in the list whatever the list is.
+const key_end = "\x1b[F";
 
 test "ctrl+p opens the settings dialog and lists the themes" {
     const gpa = testing.allocator;
-    const r = try runPlayerModal(gpa, ctrl_p);
+    const r = try runPlayerModal(gpa, "classic", ctrl_p);
     defer gpa.free(r.output);
 
     var term: Term = .init();
@@ -608,10 +611,11 @@ test "ctrl+p opens the settings dialog and lists the themes" {
 
     try testing.expect(term.contains(" settings "));
     try testing.expect(term.contains("THEME"));
-    // Both built-ins are offered. There is no theme directory under
+    // The built-ins are offered. There is no theme directory under
     // --no-config, so these are all there is to list.
-    try testing.expect(term.contains("ascii"));
     try testing.expect(term.contains("classic"));
+    try testing.expect(term.contains("ascii"));
+    try testing.expect(term.contains("paper"));
     // A modal dialog has to say how to leave.
     try testing.expect(term.contains("esc cancel"));
     try testing.expectEqual(@as(?u8, 0), r.exit);
@@ -620,28 +624,34 @@ test "ctrl+p opens the settings dialog and lists the themes" {
 test "picking a theme repaints the player, and escape puts it back" {
     const gpa = testing.allocator;
 
-    // The glyph set is the visible half of a theme, so switching to `ascii`
-    // turns every box corner into a plus. Nothing else in the program does
-    // that, which makes it the honest test of whether a preview was really
-    // applied rather than merely drawn in the list.
+    // The glyph set is the visible half of a theme, so a player started in
+    // `ascii` draws its corners as plusses, and any other theme draws them
+    // as box-drawing. Nothing else in the program does that, which makes it
+    // the honest test of whether a preview was really applied rather than
+    // merely drawn in the list.
+    //
+    // Starting in `ascii` and pressing `end` keeps this independent of how
+    // many themes ship and where `ascii` sorts among them: `end` is the
+    // last entry, whatever it is, and every theme but `ascii` is
+    // box-drawing.
     {
-        const r = try runPlayerModal(gpa, ctrl_p ++ arrow_up);
+        const r = try runPlayerModal(gpa, "ascii", ctrl_p ++ key_end);
         defer gpa.free(r.output);
         var term: Term = .init();
         term.feed(r.output);
-        try testing.expect(term.contains("+- tuiamp"));
-        try testing.expect(!term.contains("\u{250c}\u{2500} tuiamp"));
+        try testing.expect(term.contains("\u{250c}\u{2500} tuiamp"));
+        try testing.expect(!term.contains("+- tuiamp"));
         try testing.expectEqual(@as(?u8, 0), r.exit);
     }
 
     // And escape is a real cancel: the player comes back as it was, not as
     // whatever the cursor happened to be resting on.
     {
-        const r = try runPlayerModal(gpa, ctrl_p ++ arrow_up ++ "\x1b");
+        const r = try runPlayerModal(gpa, "ascii", ctrl_p ++ key_end ++ "\x1b");
         defer gpa.free(r.output);
         var term: Term = .init();
         term.feed(r.output);
-        try testing.expect(term.contains("\u{250c}\u{2500} tuiamp"));
+        try testing.expect(term.contains("+- tuiamp"));
         try testing.expect(!term.contains(" settings "));
         try testing.expectEqual(@as(?u8, 0), r.exit);
     }

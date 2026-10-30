@@ -1,0 +1,37 @@
+// tuiamp theme — synthwave. Cyan and magenta on near-black, turned up.
+//
+// The analyzer climbs cyan to purple to magenta instead of green to red,
+// which suits the palette and still reads as rising.
+.{
+    .name = "neon",
+
+    .bg = 0x0c0a14,
+    .frame = 0x3a2a5a,
+    .frame_focus = 0xff2fb9,
+    .title_bg = 0x15102a,
+    .title_fg = 0x2ff0ff,
+    .title_fg_dim = 0x1a7f8c,
+
+    .lcd_bg = 0x05040a,
+    .lcd_fg = 0xff2fb9,
+    .lcd_dim = 0x6a1250,
+
+    .text = 0x9af0ff,
+    .text_dim = 0x4a6a80,
+    .text_bright = 0xffffff,
+
+    .list_current = 0xffe94a,
+    .list_sel_bg = 0x6a1050,
+    .list_sel_fg = 0xffffff,
+
+    .track = 0x241a3a,
+    .fill = 0xff2fb9,
+    .thumb = 0x2ff0ff,
+    .button = 0xb07ad0,
+    .button_active = 0x2ff0ff,
+
+    .vis_lo = 0x2ff0ff,
+    .vis_mid = 0xa64aff,
+    .vis_hi = 0xff2fb9,
+    .vis_peak = 0xffffff,
+}

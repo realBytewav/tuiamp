@@ -1,0 +1,34 @@
+// tuiamp theme — Gruvbox dark, the warm retro palette by Pavel Pertsev.
+.{
+    .name = "gruvbox",
+
+    .bg = 0x282828,
+    .frame = 0x504945,
+    .frame_focus = 0x928374,
+    .title_bg = 0x3c3836,
+    .title_fg = 0xfabd2f,
+    .title_fg_dim = 0xa89984,
+
+    .lcd_bg = 0x1d2021,
+    .lcd_fg = 0xfabd2f,
+    .lcd_dim = 0x7c6f64,
+
+    .text = 0xebdbb2,
+    .text_dim = 0xa89984,
+    .text_bright = 0xfbf1c7,
+
+    .list_current = 0x8ec07c,
+    .list_sel_bg = 0x458588,
+    .list_sel_fg = 0xfbf1c7,
+
+    .track = 0x3c3836,
+    .fill = 0xd79921,
+    .thumb = 0xfbf1c7,
+    .button = 0xbdae93,
+    .button_active = 0xfbf1c7,
+
+    .vis_lo = 0xb8bb26,
+    .vis_mid = 0xfabd2f,
+    .vis_hi = 0xfb4934,
+    .vis_peak = 0xfbf1c7,
+}

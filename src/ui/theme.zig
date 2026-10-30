@@ -1,8 +1,15 @@
 //! Palettes and glyph sets. A "skin" in tuiamp is a `Theme`.
 //!
-//! M6 loads these from ZON files; for now the two built-ins establish the
-//! shape, and `ascii` proves the glyph indirection actually works by having
-//! to survive without any box-drawing or block characters.
+//! Every built-in theme is defined exactly once, in a ZON file under
+//! `src/themes/`, and imported at comptime. Those same files are installed
+//! to `share/tuiamp/themes/`, so what a user copies to start their own theme
+//! is literally the theme that shipped — there is no second copy in Zig that
+//! could drift from it.
+//!
+//! `ascii` proves the glyph indirection works by having to survive with no
+//! box-drawing or block characters at all. Every other theme omits the glyph
+//! table and inherits the box-drawing set, because a theme is usually just a
+//! palette.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -81,33 +88,6 @@ pub const Glyphs = struct {
         .eject = " ⏏ ",
     };
 
-    pub const ascii: Glyphs = .{
-        .bars = .{ ' ', '.', '.', ':', ':', '|', '|', '#', '#' },
-        .hbars = .{ ' ', ' ', '.', '.', '-', '-', '=', '=', '#' },
-        .h = '-',
-        .v = '|',
-        .tl = '+',
-        .tr = '+',
-        .bl = '+',
-        .br = '+',
-        .track = '-',
-        .thumb = '#',
-        .peak = '_',
-        .scope = '#',
-        .scope_hi = '-',
-        .scope_lo = '_',
-        .colon = ':',
-        .win_shade = "_",
-        .win_close = "x",
-        .sep = " *** ",
-        .now_playing = ">",
-        .prev = "|<<",
-        .play = " > ",
-        .pause = " ||",
-        .stop = "[ ]",
-        .next = ">>|",
-        .eject = " ^ ",
-    };
 };
 
 pub const Theme = struct {
@@ -152,52 +132,48 @@ pub const Theme = struct {
     glyphs: Glyphs,
 
     /// Winamp's base skin: green phosphor on near-black, blue-grey chrome.
-    pub const classic: Theme = .{
-        .name = "classic",
-        .bg = .hex(0x1c1c20),
-        .frame = .hex(0x3f3f46),
-        .frame_focus = .hex(0x6e6e78),
-        .title_bg = .hex(0x2b2b33),
-        .title_fg = .hex(0x00e000),
-        .title_fg_dim = .hex(0x4a7a4a),
-        .lcd_bg = .hex(0x000000),
-        .lcd_fg = .hex(0x00ff00),
-        .lcd_dim = .hex(0x006000),
-        .text = .hex(0x00d000),
-        .text_dim = .hex(0x3f7f3f),
-        .text_bright = .hex(0xc8ffc8),
-        .list_current = .hex(0xffffff),
-        .list_sel_bg = .hex(0x0000c6),
-        .list_sel_fg = .hex(0xffffff),
-        .track = .hex(0x37373f),
-        .fill = .hex(0x00a000),
-        .thumb = .hex(0xc8ffc8),
-        .button = .hex(0x9a9aa4),
-        .button_active = .hex(0xffffff),
-        .vis_lo = .hex(0x00ff00),
-        .vis_mid = .hex(0xffff00),
-        .vis_hi = .hex(0xff2000),
-        .vis_peak = .hex(0xc8c8c8),
-        .glyphs = .unicode,
-    };
-
+    pub const classic: Theme = builtin(@import("../themes/classic.zon"));
     /// For terminals or fonts where block and box glyphs are not trustworthy.
-    pub const ascii: Theme = blk: {
-        var t = Theme.classic;
-        t.name = "ascii";
-        t.glyphs = .ascii;
-        break :blk t;
+    pub const ascii: Theme = builtin(@import("../themes/ascii.zon"));
+    /// Amber phosphor, monochrome on purpose.
+    pub const amber: Theme = builtin(@import("../themes/amber.zon"));
+    pub const gruvbox: Theme = builtin(@import("../themes/gruvbox.zon"));
+    /// Synthwave: cyan and magenta, turned up.
+    pub const neon: Theme = builtin(@import("../themes/neon.zon"));
+    pub const nord: Theme = builtin(@import("../themes/nord.zon"));
+    /// The one light theme, for a light terminal.
+    pub const paper: Theme = builtin(@import("../themes/paper.zon"));
+
+    /// Every theme compiled in, in the order `--help` and the picker list
+    /// them: the two originals first, then the rest alphabetically. The
+    /// catalog sorts its own listing, so this order is only about reading.
+    ///
+    /// Adding a theme is a file under `src/themes/` plus two lines here.
+    pub const builtins = [_]Theme{ classic, ascii, amber, gruvbox, neon, nord, paper };
+
+    /// The ZON sources of `builtins`, in the same order, for the test that
+    /// checks the runtime parser agrees with the comptime import. A theme
+    /// that works built in but fails when copied into a user's theme
+    /// directory would be a nasty thing to ship.
+    const builtin_sources = [_][:0]const u8{
+        @embedFile("../themes/classic.zon"),
+        @embedFile("../themes/ascii.zon"),
+        @embedFile("../themes/amber.zon"),
+        @embedFile("../themes/gruvbox.zon"),
+        @embedFile("../themes/neon.zon"),
+        @embedFile("../themes/nord.zon"),
+        @embedFile("../themes/paper.zon"),
     };
 
-    /// Every theme compiled in. The catalog lists these alongside whatever
-    /// the user has dropped in their theme directory, so the two cannot
-    /// drift apart.
-    pub const builtin_names = [_][]const u8{ "classic", "ascii" };
+    comptime {
+        // The two lists are written by hand and must stay in step.
+        std.debug.assert(builtins.len == builtin_sources.len);
+    }
 
     pub fn byName(name: []const u8) ?Theme {
-        const eq = std.mem.eql;
-        if (eq(u8, name, "classic")) return .classic;
-        if (eq(u8, name, "ascii")) return .ascii;
+        for (builtins) |t| {
+            if (std.mem.eql(u8, name, t.name)) return t;
+        }
         return null;
     }
 
@@ -232,18 +208,70 @@ test "ascii theme keeps the palette but swaps glyphs" {
     try std.testing.expectEqual(@as(u21, '█'), Theme.classic.glyphs.thumb);
 }
 
-test "byName round-trips the built-ins" {
-    try std.testing.expectEqualStrings("classic", Theme.byName("classic").?.name);
-    try std.testing.expectEqualStrings("ascii", Theme.byName("ascii").?.name);
+test "every built-in is reachable by its own name, exactly once" {
+    // Otherwise the picker offers a theme that cannot be selected, or two
+    // entries resolve to the same palette.
+    for (Theme.builtins) |t| {
+        const found = Theme.byName(t.name) orelse return error.UnknownBuiltin;
+        try std.testing.expectEqualStrings(t.name, found.name);
+        try std.testing.expectEqual(t.bg, found.bg);
+
+        var seen: usize = 0;
+        for (Theme.builtins) |other| {
+            if (std.mem.eql(u8, other.name, t.name)) seen += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), seen);
+    }
     try std.testing.expect(Theme.byName("nope") == null);
+    // The first entry is the default a fresh config asks for.
+    try std.testing.expectEqualStrings("classic", Theme.builtins[0].name);
 }
 
-test "every name in builtin_names actually resolves" {
-    // Otherwise the picker offers a theme that cannot be selected.
-    for (Theme.builtin_names) |name| {
-        const t = Theme.byName(name) orelse return error.UnknownBuiltin;
-        try std.testing.expectEqualStrings(name, t.name);
+test "no built-in is unreadable: every colour pair that must differ, does" {
+    // A palette whose selection bar matches its background, or whose dim
+    // text matches the page, is invisible rather than subtle. These are the
+    // pairs that carry meaning on their own.
+    for (Theme.builtins) |t| {
+        try std.testing.expect(!std.meta.eql(t.bg, t.list_sel_bg));
+        try std.testing.expect(!std.meta.eql(t.list_sel_bg, t.list_sel_fg));
+        try std.testing.expect(!std.meta.eql(t.bg, t.text));
+        try std.testing.expect(!std.meta.eql(t.bg, t.text_dim));
+        try std.testing.expect(!std.meta.eql(t.bg, t.frame));
+        try std.testing.expect(!std.meta.eql(t.frame, t.frame_focus));
+        try std.testing.expect(!std.meta.eql(t.lcd_bg, t.lcd_fg));
+        try std.testing.expect(!std.meta.eql(t.track, t.thumb));
+        // The analyzer has to climb: three identical stops is not a gradient.
+        try std.testing.expect(!std.meta.eql(t.vis_lo, t.vis_hi));
     }
+}
+
+test "every built-in orders its three text levels away from the background" {
+    // The windows lean on a dim/plain/bright hierarchy, and the rule that
+    // makes it work is distance from the page, not absolute brightness:
+    // dim sits nearest the background, bright furthest. Asserting a large
+    // gap instead would reject real palettes — Nord's body text is already
+    // near-white, so its emphasis can only be a little brighter, and that
+    // is Nord rather than a mistake.
+    for (Theme.builtins) |t| {
+        const back = luma(t.bg);
+        const dim = @abs(luma(t.text_dim) - back);
+        const plain = @abs(luma(t.text) - back);
+        const bright = @abs(luma(t.text_bright) - back);
+
+        try std.testing.expect(dim + 0.03 < plain);
+        try std.testing.expect(plain + 0.03 < bright);
+        // And plain text has to stand off the page at all.
+        try std.testing.expect(plain > 0.25);
+    }
+}
+
+/// Rough perceptual brightness, 0 to 1. Only used to assert that palettes
+/// separate their text levels; nothing draws with it.
+fn luma(c: Rgb) f32 {
+    const r: f32 = @floatFromInt(c.r);
+    const g: f32 = @floatFromInt(c.g);
+    const b: f32 = @floatFromInt(c.b);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 }
 
 // --- loading from disk -----------------------------------------------------
@@ -279,7 +307,10 @@ pub const File = struct {
     vis_hi: u24,
     vis_peak: u24,
 
-    glyphs: GlyphFile,
+    /// Omit it to inherit `Glyphs.unicode`. Most themes are a palette and
+    /// nothing else, and 25 lines of identical box-drawing in every file is
+    /// 25 lines that can be got wrong.
+    glyphs: ?GlyphFile = null,
 
     pub const GlyphFile = struct {
         /// Nine strings, empty to full.
@@ -321,15 +352,59 @@ fn firstCodepoint(s: []const u8, fallback: u21) u21 {
     return it.nextCodepoint() orelse fallback;
 }
 
+/// A built-in, converted at comptime. The ZON parser the runtime path uses
+/// is not involved: `@import` of a `.zon` file coerces straight to `File`.
+fn builtin(comptime f: File) Theme {
+    @setEvalBranchQuota(100_000);
+    return fromFile(f);
+}
+
 /// Convert a parsed file into a usable theme. Strings are borrowed from the
 /// arena the file was parsed into, so that arena must outlive the theme.
 pub fn fromFile(f: File) Theme {
-    const d = Theme.classic.glyphs;
+    // `Glyphs.unicode` rather than `Theme.classic.glyphs`: classic is itself
+    // built by this function, so reaching for it here would be a cycle.
+    const d = Glyphs.unicode;
+    const gf = f.glyphs orelse return paletteOnly(f, d);
+
     var bars: [9]u21 = undefined;
     var hbars: [9]u21 = undefined;
-    for (f.glyphs.bars, 0..) |s, i| bars[i] = firstCodepoint(s, d.bars[i]);
-    for (f.glyphs.hbars, 0..) |s, i| hbars[i] = firstCodepoint(s, d.hbars[i]);
+    for (gf.bars, 0..) |s, i| bars[i] = firstCodepoint(s, d.bars[i]);
+    for (gf.hbars, 0..) |s, i| hbars[i] = firstCodepoint(s, d.hbars[i]);
 
+    var t = paletteOnly(f, d);
+    t.glyphs = .{
+        .bars = bars,
+        .hbars = hbars,
+        .h = firstCodepoint(gf.h, d.h),
+        .v = firstCodepoint(gf.v, d.v),
+        .tl = firstCodepoint(gf.tl, d.tl),
+        .tr = firstCodepoint(gf.tr, d.tr),
+        .bl = firstCodepoint(gf.bl, d.bl),
+        .br = firstCodepoint(gf.br, d.br),
+        .track = firstCodepoint(gf.track, d.track),
+        .thumb = firstCodepoint(gf.thumb, d.thumb),
+        .peak = firstCodepoint(gf.peak, d.peak),
+        .scope = firstCodepoint(gf.scope, d.scope),
+        .scope_hi = firstCodepoint(gf.scope_hi, d.scope_hi),
+        .scope_lo = firstCodepoint(gf.scope_lo, d.scope_lo),
+        .colon = firstCodepoint(gf.colon, d.colon),
+        .win_shade = gf.win_shade,
+        .win_close = gf.win_close,
+        .sep = gf.sep,
+        .now_playing = gf.now_playing,
+        .prev = gf.prev,
+        .play = gf.play,
+        .pause = gf.pause,
+        .stop = gf.stop,
+        .next = gf.next,
+        .eject = gf.eject,
+    };
+    return t;
+}
+
+/// The colours, with `glyphs` left at the inherited set.
+fn paletteOnly(f: File, g: Glyphs) Theme {
     return .{
         .name = f.name,
         .bg = .hex(f.bg),
@@ -356,33 +431,7 @@ pub fn fromFile(f: File) Theme {
         .vis_mid = .hex(f.vis_mid),
         .vis_hi = .hex(f.vis_hi),
         .vis_peak = .hex(f.vis_peak),
-        .glyphs = .{
-            .bars = bars,
-            .hbars = hbars,
-            .h = firstCodepoint(f.glyphs.h, d.h),
-            .v = firstCodepoint(f.glyphs.v, d.v),
-            .tl = firstCodepoint(f.glyphs.tl, d.tl),
-            .tr = firstCodepoint(f.glyphs.tr, d.tr),
-            .bl = firstCodepoint(f.glyphs.bl, d.bl),
-            .br = firstCodepoint(f.glyphs.br, d.br),
-            .track = firstCodepoint(f.glyphs.track, d.track),
-            .thumb = firstCodepoint(f.glyphs.thumb, d.thumb),
-            .peak = firstCodepoint(f.glyphs.peak, d.peak),
-            .scope = firstCodepoint(f.glyphs.scope, d.scope),
-            .scope_hi = firstCodepoint(f.glyphs.scope_hi, d.scope_hi),
-            .scope_lo = firstCodepoint(f.glyphs.scope_lo, d.scope_lo),
-            .colon = firstCodepoint(f.glyphs.colon, d.colon),
-            .win_shade = f.glyphs.win_shade,
-            .win_close = f.glyphs.win_close,
-            .sep = f.glyphs.sep,
-            .now_playing = f.glyphs.now_playing,
-            .prev = f.glyphs.prev,
-            .play = f.glyphs.play,
-            .pause = f.glyphs.pause,
-            .stop = f.glyphs.stop,
-            .next = f.glyphs.next,
-            .eject = f.glyphs.eject,
-        },
+        .glyphs = g,
     };
 }
 
@@ -559,37 +608,50 @@ test "resolve loads a theme file from the user's theme directory" {
     try std.testing.expectEqual(@as(u21, '#'), t.glyphs.thumb);
 }
 
-test "the theme files shipped in themes/ parse and match the built-ins" {
+test "the runtime parser agrees with the comptime import, for every theme" {
+    // The built-ins come from `@import`; a user's copy comes from
+    // `parseTheme`. A theme that works one way and not the other would be a
+    // nasty thing to ship, since copying a shipped theme out of
+    // share/tuiamp/themes is the documented way to start your own.
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Embedded rather than read from disk, so the test does not depend on
-    // the working directory and cannot silently skip.
-    const sources = [_][:0]const u8{
-        @embedFile("../themes/classic.zon"),
-        @embedFile("../themes/ascii.zon"),
-    };
-    const builtins = [_]Theme{ .classic, .ascii };
+    for (Theme.builtin_sources, Theme.builtins) |source, want| {
+        const got = parseTheme(arena, source) orelse return error.ThemeFailedToParse;
+        try std.testing.expectEqualStrings(want.name, got.name);
 
-    for (sources, builtins) |source, builtin| {
-        const loaded = parseTheme(arena, source) orelse return error.ThemeFailedToParse;
-        try std.testing.expectEqualStrings(builtin.name, loaded.name);
-        // A shipped file drifting from the built-in it documents would be a
-        // quiet lie, so check every colour and glyph.
-        try std.testing.expectEqual(builtin.bg, loaded.bg);
-        try std.testing.expectEqual(builtin.lcd_fg, loaded.lcd_fg);
-        try std.testing.expectEqual(builtin.list_sel_bg, loaded.list_sel_bg);
-        try std.testing.expectEqual(builtin.vis_hi, loaded.vis_hi);
-        try std.testing.expectEqual(builtin.glyphs.bars, loaded.glyphs.bars);
-        try std.testing.expectEqual(builtin.glyphs.hbars, loaded.glyphs.hbars);
-        try std.testing.expectEqual(builtin.glyphs.thumb, loaded.glyphs.thumb);
-        try std.testing.expectEqual(builtin.glyphs.colon, loaded.glyphs.colon);
-        try std.testing.expectEqualStrings(builtin.glyphs.sep, loaded.glyphs.sep);
-        try std.testing.expectEqualStrings(builtin.glyphs.prev, loaded.glyphs.prev);
-        try std.testing.expectEqualStrings(builtin.glyphs.eject, loaded.glyphs.eject);
+        inline for (@typeInfo(Theme).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "name")) continue;
+            if (comptime std.mem.eql(u8, f.name, "glyphs")) continue;
+            try std.testing.expectEqual(@field(want, f.name), @field(got, f.name));
+        }
+
+        try std.testing.expectEqual(want.glyphs.bars, got.glyphs.bars);
+        try std.testing.expectEqual(want.glyphs.hbars, got.glyphs.hbars);
+        try std.testing.expectEqual(want.glyphs.thumb, got.glyphs.thumb);
+        try std.testing.expectEqual(want.glyphs.colon, got.glyphs.colon);
+        try std.testing.expectEqualStrings(want.glyphs.sep, got.glyphs.sep);
+        try std.testing.expectEqualStrings(want.glyphs.prev, got.glyphs.prev);
+        try std.testing.expectEqualStrings(want.glyphs.eject, got.glyphs.eject);
     }
+}
+
+test "a theme with no glyph table inherits the box-drawing set" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // amber ships without a `.glyphs` block, so it must come out with
+    // classic's glyphs and its own colours.
+    const t = parseTheme(arena, Theme.builtin_sources[2]).?;
+    try std.testing.expectEqualStrings("amber", t.name);
+    try std.testing.expectEqual(Theme.classic.glyphs.thumb, t.glyphs.thumb);
+    try std.testing.expectEqual(Theme.classic.glyphs.tl, t.glyphs.tl);
+    try std.testing.expectEqualStrings(Theme.classic.glyphs.prev, t.glyphs.prev);
+    try std.testing.expect(!std.meta.eql(t.bg, Theme.classic.bg));
 }
 
 // --- the catalog -----------------------------------------------------------
@@ -654,7 +716,7 @@ pub const Catalog = struct {
     /// list themes should never be worse than having none to list.
     pub fn refresh(c: *Catalog, io: Io, config_dir: ?[]const u8) void {
         c.clear();
-        for (Theme.builtin_names) |name| c.add(name);
+        for (Theme.builtins) |t| c.add(t.name);
         if (config_dir) |dir| c.addDirectory(io, dir);
         std.mem.sort(Entry, c.entries.items, {}, lessByName);
     }
@@ -712,19 +774,29 @@ test "the catalog lists the built-ins with no theme directory" {
     defer c.deinit();
 
     c.refresh(std.testing.io, null);
-    try std.testing.expectEqual(Theme.builtin_names.len, c.len());
+    try std.testing.expectEqual(Theme.builtins.len, c.len());
+
     // Alphabetical, so the list does not reorder itself between openings.
-    try std.testing.expectEqualStrings("ascii", c.nameAt(0));
-    try std.testing.expectEqualStrings("classic", c.nameAt(1));
-    try std.testing.expectEqual(@as(?usize, 1), c.indexOf("classic"));
-    try std.testing.expectEqual(@as(?usize, null), c.indexOf("amber"));
+    var i: usize = 1;
+    while (i < c.len()) : (i += 1) {
+        try std.testing.expect(std.mem.lessThan(u8, c.nameAt(i - 1), c.nameAt(i)));
+    }
+    // Every built-in is offered, wherever it sorts to.
+    for (Theme.builtins) |t| {
+        const at = c.indexOf(t.name) orelse return error.BuiltinMissingFromCatalog;
+        try std.testing.expectEqualStrings(t.name, c.nameAt(at));
+    }
+    try std.testing.expectEqual(@as(?usize, null), c.indexOf("no-such-theme"));
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
-    const t = c.themeAt(arena_state.allocator(), std.testing.io, null, 1).?;
+    const arena = arena_state.allocator();
+
+    const classic_at = c.indexOf("classic").?;
+    const t = c.themeAt(arena, std.testing.io, null, classic_at).?;
     try std.testing.expectEqualStrings("classic", t.name);
     // Out of range is null rather than a crash.
-    try std.testing.expect(c.themeAt(arena_state.allocator(), std.testing.io, null, 99) == null);
+    try std.testing.expect(c.themeAt(arena, std.testing.io, null, 99) == null);
 }
 
 test "the catalog picks up theme files and does not list a name twice" {
@@ -737,7 +809,7 @@ test "the catalog picks up theme files and does not list a name twice" {
 
     const minimal =
         \\.{
-        \\    .name = "amber",
+        \\    .name = "lagoon",
         \\    .bg = 0, .frame = 1, .frame_focus = 2, .title_bg = 3, .title_fg = 4,
         \\    .title_fg_dim = 5, .lcd_bg = 6, .lcd_fg = 7, .lcd_dim = 8, .text = 9,
         \\    .text_dim = 10, .text_bright = 11, .list_current = 12,
@@ -756,8 +828,8 @@ test "the catalog picks up theme files and does not list a name twice" {
         \\    },
         \\}
     ;
-    try tmp.dir.writeFile(io, .{ .sub_path = "themes/amber.zon", .data = minimal });
-    // A file named after a built-in shadows it rather than appearing twice.
+    // One new name, and one that shadows a built-in rather than doubling it.
+    try tmp.dir.writeFile(io, .{ .sub_path = "themes/lagoon.zon", .data = minimal });
     try tmp.dir.writeFile(io, .{ .sub_path = "themes/ascii.zon", .data = minimal });
     // Anything that is not a theme file is ignored.
     try tmp.dir.writeFile(io, .{ .sub_path = "themes/notes.txt", .data = "hello" });
@@ -769,25 +841,30 @@ test "the catalog picks up theme files and does not list a name twice" {
     defer c.deinit();
     c.refresh(io, root);
 
-    try std.testing.expectEqual(@as(usize, 3), c.len());
-    try std.testing.expectEqualStrings("amber", c.nameAt(0));
-    try std.testing.expectEqualStrings("ascii", c.nameAt(1));
-    try std.testing.expectEqualStrings("classic", c.nameAt(2));
+    // The built-ins plus exactly one new name.
+    try std.testing.expectEqual(Theme.builtins.len + 1, c.len());
+    try std.testing.expect(c.indexOf("lagoon") != null);
     try std.testing.expect(c.indexOf("notes") == null);
+    try std.testing.expect(c.indexOf("ascii") != null);
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The file resolves, and the one shadowing "ascii" wins over the
+    // The new file resolves, and the one shadowing "ascii" wins over the
     // built-in, exactly as passing --theme ascii would.
-    try std.testing.expectEqualStrings("amber", c.themeAt(arena, io, root, 0).?.name);
-    try std.testing.expectEqual(@as(u21, '@'), c.themeAt(arena, io, root, 1).?.glyphs.thumb);
-    try std.testing.expectEqualStrings("classic", c.themeAt(arena, io, root, 2).?.name);
+    const lagoon = c.themeAt(arena, io, root, c.indexOf("lagoon").?).?;
+    try std.testing.expectEqualStrings("lagoon", lagoon.name);
+    const shadowed = c.themeAt(arena, io, root, c.indexOf("ascii").?).?;
+    try std.testing.expectEqual(@as(u21, '@'), shadowed.glyphs.thumb);
+    try std.testing.expect(!std.meta.eql(shadowed.bg, Theme.ascii.bg));
+    // An unshadowed built-in still comes from the built-in.
+    const classic = c.themeAt(arena, io, root, c.indexOf("classic").?).?;
+    try std.testing.expectEqual(Theme.classic.bg, classic.bg);
 
     // Refreshing twice is stable rather than accumulating.
     c.refresh(io, root);
-    try std.testing.expectEqual(@as(usize, 3), c.len());
+    try std.testing.expectEqual(Theme.builtins.len + 1, c.len());
 }
 
 test "a refresh that finds nothing still leaves the built-ins" {
@@ -795,5 +872,5 @@ test "a refresh that finds nothing still leaves the built-ins" {
     var c: Catalog = .init(gpa);
     defer c.deinit();
     c.refresh(std.testing.io, "/definitely/not/here");
-    try std.testing.expectEqual(Theme.builtin_names.len, c.len());
+    try std.testing.expectEqual(Theme.builtins.len, c.len());
 }

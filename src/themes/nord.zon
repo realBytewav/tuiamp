@@ -1,0 +1,37 @@
+// tuiamp theme — Nord, the cool blue-grey palette by Arctic Ice Studio.
+//
+// The analyzer keeps Winamp's green-yellow-red climb, in Nord's own hues
+// rather than saturated primaries.
+.{
+    .name = "nord",
+
+    .bg = 0x2e3440,
+    .frame = 0x434c5e,
+    .frame_focus = 0x81a1c1,
+    .title_bg = 0x3b4252,
+    .title_fg = 0x88c0d0,
+    .title_fg_dim = 0x5e81ac,
+
+    .lcd_bg = 0x242933,
+    .lcd_fg = 0x8fbcbb,
+    .lcd_dim = 0x4c566a,
+
+    .text = 0xd8dee9,
+    .text_dim = 0x7b8798,
+    .text_bright = 0xeceff4,
+
+    .list_current = 0xebcb8b,
+    .list_sel_bg = 0x5e81ac,
+    .list_sel_fg = 0xeceff4,
+
+    .track = 0x3b4252,
+    .fill = 0x88c0d0,
+    .thumb = 0xeceff4,
+    .button = 0x9aa7b8,
+    .button_active = 0xeceff4,
+
+    .vis_lo = 0xa3be8c,
+    .vis_mid = 0xebcb8b,
+    .vis_hi = 0xbf616a,
+    .vis_peak = 0xeceff4,
+}

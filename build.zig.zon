@@ -1,6 +1,6 @@
 .{
     .name = .tuiamp,
-    .version = "0.0.0",
+    .version = "0.2.0",
     .fingerprint = 0x9f2efc83bf15ec1c,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},

@@ -929,6 +929,7 @@ pub const App = struct {
         switch (l.hitTest(local)) {
             .close => a.quit = true,
             .shade => a.shaded = !a.shaded,
+            .help => a.cycleHelp(),
             .time => a.show_remaining = !a.show_remaining,
             .vis => a.analyzer.mode = a.analyzer.mode.next(),
             .prev => a.step(.backward),

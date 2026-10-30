@@ -36,6 +36,10 @@ pub const Hit = union(enum) {
     titlebar,
     shade,
     close,
+    /// The `?` in the titlebar, which opens the same overlay the `?` key
+    /// does. Winamp had no such button; a TUI needs one, because there is
+    /// nothing else on screen to tell you the overlay exists.
+    help,
     /// Winamp toggles elapsed/remaining when the time display is clicked.
     time,
     /// Clicking the analyzer cycles its mode.
@@ -58,6 +62,7 @@ pub const Hit = union(enum) {
 pub const Layout = struct {
     frame: Rect,
     titlebar: Rect,
+    help_btn: Rect,
     shade_btn: Rect,
     close_btn: Rect,
     clock: Rect,
@@ -88,6 +93,7 @@ pub const Layout = struct {
             .titlebar = .{ .x = 0, .y = 0, .w = width, .h = 1 },
             // Grouped at the right edge, the way Winamp's titlebar buttons
             // sit together rather than being sprinkled along the bar.
+            .help_btn = .{ .x = width - 8, .y = 0, .w = 1, .h = 1 },
             .shade_btn = .{ .x = width - 6, .y = 0, .w = 1, .h = 1 },
             .close_btn = .{ .x = width - 4, .y = 0, .w = 1, .h = 1 },
 
@@ -129,6 +135,7 @@ pub const Layout = struct {
 
         if (l.close_btn.contains(p)) return .close;
         if (l.shade_btn.contains(p)) return .shade;
+        if (l.help_btn.contains(p)) return .help;
         if (l.titlebar.contains(p)) return .titlebar;
 
         if (l.clock.contains(p)) return .time;
@@ -318,14 +325,22 @@ fn drawFrame(p: Painter, l: Layout, v: View) void {
         const s = std.fmt.bufPrint(&buf, " {d}/{d} ", .{ v.track_index + 1, v.track_count }) catch "";
         _ = p.text(w / 2 - @as(u16, @intCast(s.len / 2)), 0, s, th.onBg(th.title_fg_dim));
     }
+    // One block behind all three buttons, so they read as a group rather
+    // than as three marks that happen to be near each other.
     p.fillRect(
-        .{ .x = l.shade_btn.x - 1, .y = 0, .w = 6, .h = 1 },
+        .{ .x = l.help_btn.x -| 1, .y = 0, .w = 8, .h = 1 },
         ' ',
         th.onBg(th.button),
     );
+    // A literal "?" rather than a themed glyph: it is the one mark whose
+    // meaning is the character itself, and every font has it.
+    _ = p.text(l.help_btn.x, 0, help_mark, th.onBg(th.button));
     _ = p.text(l.shade_btn.x, 0, g.win_shade, th.onBg(th.button));
     _ = p.text(l.close_btn.x, 0, g.win_close, th.onBg(th.button));
 }
+
+/// The titlebar's help button. Not part of the glyph set — see `drawFrame`.
+pub const help_mark = "?";
 
 fn drawButton(p: Painter, r: Rect, label: []const u8, active: bool, th: Theme) void {
     const style = th.onBg(if (active) th.button_active else th.button);
@@ -352,6 +367,7 @@ pub fn drawShade(p: Painter, v: View, marquee: Marquee) void {
     var shade: Layout = .compute();
     shade.frame = .{ .x = 0, .y = 0, .w = w, .h = shade_height };
     shade.titlebar = .{ .x = 0, .y = 0, .w = w, .h = 1 };
+    shade.help_btn = .{ .x = w - 8, .y = 0, .w = 1, .h = 1 };
     shade.shade_btn = .{ .x = w - 6, .y = 0, .w = 1, .h = 1 };
     shade.close_btn = .{ .x = w - 4, .y = 0, .w = 1, .h = 1 };
     drawFrame(p, shade, v);
@@ -422,8 +438,58 @@ test "hitTest finds each control at its drawn position" {
     try testing.expectEqual(Hit.time, l.hitTest(.{ .x = l.clock.x, .y = l.clock.y + 1 }));
     try testing.expectEqual(Hit.vis, l.hitTest(.{ .x = l.vis.x + 3, .y = l.vis.y + 2 }));
     try testing.expectEqual(Hit.close, l.hitTest(.{ .x = l.close_btn.x, .y = 0 }));
+    try testing.expectEqual(Hit.shade, l.hitTest(.{ .x = l.shade_btn.x, .y = 0 }));
+    try testing.expectEqual(Hit.help, l.hitTest(.{ .x = l.help_btn.x, .y = 0 }));
     try testing.expectEqual(Hit.titlebar, l.hitTest(.{ .x = 2, .y = 0 }));
     try testing.expectEqual(Hit.none, l.hitTest(.{ .x = 40, .y = 14 }));
+}
+
+test "the titlebar buttons do not overlap, and the title has room" {
+    const l: Layout = .compute();
+    const buttons = [_]Rect{ l.help_btn, l.shade_btn, l.close_btn };
+    for (buttons, 0..) |a, i| {
+        try testing.expect(a.right() <= width);
+        for (buttons[i + 1 ..]) |b| {
+            try testing.expect(a.right() <= b.x or b.right() <= a.x);
+        }
+    }
+    // Left to right, so the cluster reads in the order it is drawn.
+    try testing.expect(l.help_btn.x < l.shade_btn.x);
+    try testing.expect(l.shade_btn.x < l.close_btn.x);
+    // And the " 1/40 " readout in the middle of the bar cannot reach them.
+    try testing.expect(width / 2 + 8 < l.help_btn.x);
+}
+
+test "the help button is drawn where hitTest reports it" {
+    const gpa = testing.allocator;
+    var s = try screen.Screen.init(gpa, width, height);
+    defer s.deinit();
+    s.clear(.plain);
+
+    const l: Layout = .compute();
+    draw(s.painter(s.bounds()), l, .{ .theme = .classic }, .{});
+
+    // A button the mouse can find but the eye cannot is worse than no
+    // button, since the whole point of it is to be noticed.
+    try testing.expectEqual(@as(u21, '?'), s.get(l.help_btn.x, 0).?.cp);
+    try testing.expectEqual(Hit.help, l.hitTest(.{ .x = l.help_btn.x, .y = 0 }));
+}
+
+test "the windowshade titlebar carries the same buttons" {
+    const gpa = testing.allocator;
+    // Narrow enough to be the realistic worst case for the button cluster.
+    for ([_]u16{ min_shade_width, 40, 80 }) |w| {
+        var s = try screen.Screen.init(gpa, w, shade_height);
+        defer s.deinit();
+        s.clear(.plain);
+        drawShade(s.painter(s.bounds()), .{ .theme = .classic }, .{});
+
+        try testing.expectEqual(@as(u21, '?'), s.get(w - 8, 0).?.cp);
+        try testing.expectEqual(
+            try std.unicode.utf8Decode(Theme.classic.glyphs.win_close),
+            s.get(w - 4, 0).?.cp,
+        );
+    }
 }
 
 test "clicking a slider's ends yields its extreme values" {

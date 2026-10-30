@@ -50,17 +50,14 @@ const key_lines = [_][]const u8{
     "  v  stop                        ctrl+p  settings",
     "  b  next                        w       windowshade",
     "  space  play / pause            ?       keys, then features",
-    "",
+    "  t  elapsed / remaining         q       quit",
     "PLAYBACK                       PLAYLIST  (when focused)",
     "  left / right   seek 5s          up / down      select",
     "  pgup / pgdn    seek 30s         shift+up/down  reorder",
     "  up / down      volume           enter          play",
     "  s  shuffle   r  repeat          del            remove",
-    "  t  elapsed / remaining          home / end     first / last",
-    "  j  jump to playing track",
+    "  j  jump to playing track        home / end     first / last",
     "  g  analyzer: spectrum, scope, off",
-    "  q  quit",
-    "",
     "EQUALIZER  (when focused)      MOUSE",
     "  left / right  select band      drag the sliders",
     "  up / down     adjust           click the buttons",
@@ -75,24 +72,20 @@ const feature_lines = [_][]const u8{
     "FORMATS",
     "  mp3, flac and wav, through miniaudio's own decoders.",
     "  no ogg, opus or aac.",
-    "",
     "TAGS",
     "  id3v2.2 / 2.3 / 2.4 and vorbis comments, read at scan time,",
     "  so titles and lengths are there before anything plays.",
-    "",
     "PLAYLIST",
     "  recursive directory scan; m3u, m3u8 and pls read and written;",
     "  reorder, shuffle, repeat off / all / one.",
-    "",
+    "  the scrollbar is the window's right-hand border. drag it.",
     "VISUALIZER AND EQUALIZER",
     "  a windowed fft spectrum with falling peak caps, or an",
     "  oscilloscope at half-block resolution.  g cycles them.",
     "  ten bands at winamp's frequencies, +/- 12 dB, and a preamp.",
-    "",
     "THEMES",
-    "  palette and glyphs in a zon file.  ctrl+p switches between",
-    "  the built-ins and anything in ~/.config/tuiamp/themes/.",
-    "",
+    "  palette and glyphs in a zon file.  ctrl+p lists the built-ins",
+    "  and whatever is in ~/.config/tuiamp/themes/, previewing live.",
     "NOT YET",
     "  no gapless, no network streams, no double-size mode.",
 };
@@ -104,6 +97,10 @@ const footer = "it really whips the llama's ass";
 /// 80-column terminal.
 pub const width: u16 = 68;
 /// Sized for the tallest page, so flipping pages does not move the box.
+///
+/// Both pages are kept inside 20 lines deliberately: that puts the whole
+/// overlay in 24 rows, so a plain 80x24 terminal shows all of it rather
+/// than quietly cutting the bottom section off.
 pub const height: u16 = tallest + 4;
 
 const tallest: u16 = @max(key_lines.len, feature_lines.len);

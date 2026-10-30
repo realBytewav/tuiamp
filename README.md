@@ -27,7 +27,8 @@ widgets in their real Winamp positions.
   `std.Io.File`, so neither 0.15 nor 0.17 will work.
 - **A font with box-drawing and block glyphs**, or `--theme ascii`.
 - 80x16 cells for the full layout; it falls back to a one-line windowshade
-  below that.
+  below that. 80x24 shows the whole `?` overlay, which is what it is sized
+  for.
 
 ## Running it
 
@@ -52,9 +53,9 @@ tuiamp --volume 25 --theme ascii ~/Music/Album
 tuiamp --devices          # which backend and output device it will use
 ```
 
-Press `?` for the keymap, then again for what it can do. `ctrl+p` opens
-settings. Settings are saved to `~/.config/tuiamp/config.zon` on exit;
-`--no-config` leaves it alone.
+Press `?` — or click the `?` in the titlebar — for the keymap, then again
+for what it can do. `ctrl+p` opens settings. Settings are saved to
+`~/.config/tuiamp/config.zon` on exit; `--no-config` leaves it alone.
 
 ## Keys
 
@@ -89,11 +90,16 @@ sets volume, or scrolls the playlist.
   peak caps, or an oscilloscope at half-block resolution.
 - **Equalizer**: ten bands at Winamp's frequencies plus a preamp, ±12 dB, as a
   chain of peaking biquads, with Winamp's stock presets.
-- **Themes**: palette and glyph set in a ZON file. Two are built in
-  (`classic`, `ascii`); copy one from `share/tuiamp/themes/` into
-  `~/.config/tuiamp/themes/` and pass its name to `--theme`, or pick it from
-  `ctrl+p`, which lists the built-ins alongside whatever is in that
-  directory and applies each one as you move down the list.
+- **Themes**: palette and glyph set in a ZON file. Seven are built in —
+  `classic`, `ascii`, `amber` (monochrome phosphor), `gruvbox`, `neon`
+  (synthwave), `nord`, and `paper`, the one for a light terminal. Pick one
+  with `ctrl+p`, which lists them alongside whatever is in
+  `~/.config/tuiamp/themes/` and applies each as you move down the list, or
+  pass `--theme <name>`. Each built-in is defined once, in the same ZON file
+  that gets installed to `share/tuiamp/themes/`, so what you copy to start
+  your own theme is literally the theme that shipped. A theme is usually
+  just a palette: leave the glyph table out and it inherits the
+  box-drawing set.
 
 ## What it does not do
 
@@ -125,7 +131,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 251 unit + 10 end-to-end tests
+zig build test            # 256 unit + 10 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries
@@ -145,7 +151,8 @@ The **end-to-end tests** allocate a pseudo-terminal, exec the real binary on
 it, type at it, and assert on what it draws and how it exits — that the
 window appears, that keys reach it, that it keeps redrawing while playing,
 that a scrolled playlist stays where it was put, that `ctrl+p` really
-repaints the player in another theme, and that it hands the terminal back.
+repaints the player in another theme rather than just listing one, and that
+it hands the terminal back.
 They replay the output into a cell grid first, because the renderer emits
 only the cells that changed: a playlist row reading `30. Scroll 30` after a
 scroll is assembled from whatever differed from the frame before and need

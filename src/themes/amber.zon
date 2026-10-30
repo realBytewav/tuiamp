@@ -1,0 +1,41 @@
+// tuiamp theme — amber phosphor, as a DEC VT or Wyse terminal glowed.
+//
+// Monochrome on purpose: the analyzer gradient runs dim amber to near-white
+// rather than through other hues, so height reads as brightness the way it
+// did on a real CRT.
+//
+// A theme needs only the colours. Leave `.glyphs` out and it inherits the
+// box-drawing set; copy the block from classic.zon to change it.
+.{
+    .name = "amber",
+
+    .bg = 0x120d05,
+    .frame = 0x4a3718,
+    .frame_focus = 0x8a6628,
+    .title_bg = 0x1c1409,
+    .title_fg = 0xffb000,
+    .title_fg_dim = 0x8a6000,
+
+    .lcd_bg = 0x0a0702,
+    .lcd_fg = 0xffb000,
+    .lcd_dim = 0x6b4a00,
+
+    .text = 0xe0a000,
+    .text_dim = 0x8a6410,
+    .text_bright = 0xffe0a8,
+
+    .list_current = 0xfff0d0,
+    .list_sel_bg = 0x7a4a00,
+    .list_sel_fg = 0x1a1205,
+
+    .track = 0x332400,
+    .fill = 0xcc8800,
+    .thumb = 0xffe0a8,
+    .button = 0xc09050,
+    .button_active = 0xffe8c0,
+
+    .vis_lo = 0x8a5a00,
+    .vis_mid = 0xffb000,
+    .vis_hi = 0xffe8a0,
+    .vis_peak = 0xfff6e0,
+}
