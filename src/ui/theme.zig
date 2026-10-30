@@ -87,7 +87,6 @@ pub const Glyphs = struct {
         .next = "▶▶|",
         .eject = " ⏏ ",
     };
-
 };
 
 pub const Theme = struct {
