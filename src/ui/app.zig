@@ -53,6 +53,8 @@ const Drag = union(enum) {
     eq_preamp,
     /// Index into the EQ bands.
     eq_band: usize,
+    /// The playlist scrollbar's thumb.
+    playlist_scroll,
 };
 const Focus = enum { main, eq, playlist };
 
@@ -97,6 +99,11 @@ pub const App = struct {
     eq_cursor: usize = 0,
     playlist_open: bool = false,
     playlist_scroll: usize = 0,
+    /// Set when the cursor moves, and cleared once the view has caught up.
+    /// Without it the playlist view is recentred on the cursor every frame,
+    /// which yanks the wheel and the scrollbar straight back where they
+    /// started. Starts true so the first frame opens on the cursor.
+    follow_cursor: bool = true,
     /// Null when the overlay is closed; `?` walks the pages and then closes.
     help_page: ?help.Page = null,
     drag: Drag = .none,
@@ -485,6 +492,14 @@ pub const App = struct {
 
     /// Returns true when the key was consumed by the playlist.
     fn handlePlaylistKey(a: *App, key: input.Key, mods: input.Mods) bool {
+        const consumed = a.playlistKey(key, mods);
+        // Any key the playlist took may have moved the cursor, so let the
+        // view catch up with it on the next frame.
+        if (consumed) a.follow_cursor = true;
+        return consumed;
+    }
+
+    fn playlistKey(a: *App, key: input.Key, mods: input.Mods) bool {
         const count = a.list.len();
         if (count == 0) return false;
         const last = count - 1;
@@ -673,6 +688,7 @@ pub const App = struct {
     fn revealCurrent(a: *App) void {
         const idx = a.list.currentIndex() orelse return;
         a.list.cursor = idx;
+        a.follow_cursor = true;
         if (!a.playlist_open) a.playlist_open = true;
     }
 
@@ -689,6 +705,9 @@ pub const App = struct {
                 } else {
                     a.playlist_scroll += delta;
                 }
+                // The wheel is the user saying where to look, so stop
+                // following the cursor until they move it again.
+                a.follow_cursor = false;
             } else if (m.button == .wheel_up) {
                 a.player.nudgeVolume(0.05);
             } else {
@@ -796,6 +815,11 @@ pub const App = struct {
         switch (l.hitTest(local, a.playlist_scroll, a.list.len())) {
             .close => a.togglePlaylist(),
             .shade => a.togglePlaylist(),
+            .scrollbar => |target| {
+                a.drag = .playlist_scroll;
+                a.playlist_scroll = target;
+                a.follow_cursor = false;
+            },
             .row => |index| {
                 const is_double = if (a.last_click) |c|
                     c.point.x == point.x and c.point.y == point.y and
@@ -857,6 +881,28 @@ pub const App = struct {
                     else => unreachable,
                 };
                 a.setEqGain(control, gain);
+            },
+            // The scrollbar is vertical too, and its row maps straight onto
+            // a scroll position, so the thumb follows the pointer exactly.
+            .playlist_scroll => {
+                const l = playlist_window.Layout.compute(
+                    a.playlist_origin.w,
+                    a.playlist_origin.h,
+                );
+                if (l.scrollbar.h == 0) return;
+                const win_y: i32 = @as(i32, m.y) - @as(i32, a.playlist_origin.y);
+                const row = std.math.clamp(
+                    win_y - @as(i32, l.scrollbar.y),
+                    0,
+                    @as(i32, l.scrollbar.h) - 1,
+                );
+                a.playlist_scroll = playlist_window.scrollForThumbTop(
+                    @intCast(row),
+                    a.list.len(),
+                    l.capacity(),
+                    l.scrollbar.h,
+                );
+                a.follow_cursor = false;
             },
         }
     }
@@ -947,15 +993,21 @@ pub const App = struct {
         }
 
         if (pl_h > 0) {
-            // Keep the cursor on screen before drawing, so the view follows
-            // keyboard navigation without the caller having to think about it.
+            // Settle the scroll before drawing. When the cursor has just
+            // moved the view follows it, so keyboard navigation works
+            // without the caller thinking about it; otherwise the view stays
+            // where the user scrolled it to and is only held in range.
             const l = playlist_window.Layout.compute(w, pl_h);
-            a.playlist_scroll = playlist_window.scrollToShow(
-                a.playlist_scroll,
-                a.list.cursor,
-                a.list.len(),
-                l.capacity(),
-            );
+            a.playlist_scroll = if (a.follow_cursor)
+                playlist_window.scrollToShow(
+                    a.playlist_scroll,
+                    a.list.cursor,
+                    a.list.len(),
+                    l.capacity(),
+                )
+            else
+                playlist_window.clampScroll(a.playlist_scroll, a.list.len(), l.capacity());
+            a.follow_cursor = false;
             playlist_window.draw(a.screen.painter(a.playlist_origin), l, .{
                 .theme = a.theme,
                 .focused = a.focus == .playlist,

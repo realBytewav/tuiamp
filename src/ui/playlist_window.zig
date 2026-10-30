@@ -7,6 +7,11 @@
 //! Two independent positions matter and are easy to conflate: `cursor` is the
 //! row the user has highlighted, and the *current* entry is what is playing.
 //! Winamp draws them differently and they move independently.
+//!
+//! The scrollbar lives in the window's own right-hand border rather than in a
+//! column of its own, which is where Winamp put it too: a 1,457-track
+//! playlist needs to show you where you are, and it should not cost a
+//! character of title to do it.
 
 const std = @import("std");
 const geom = @import("../term/geom.zig");
@@ -37,6 +42,9 @@ pub const Hit = union(enum) {
     /// whatever happens to be last.
     empty,
     status,
+    /// The scrollbar, carrying the scroll position the click asks for. Only
+    /// produced while the bar is actually drawn.
+    scrollbar: usize,
 };
 
 pub const Layout = struct {
@@ -46,6 +54,8 @@ pub const Layout = struct {
     close_btn: Rect,
     /// The scrolling entry area.
     rows: Rect,
+    /// The right-hand border alongside `rows`, doubling as the scrollbar.
+    scrollbar: Rect,
     status: Rect,
 
     pub fn compute(w: u16, h: u16) Layout {
@@ -56,6 +66,7 @@ pub const Layout = struct {
             .shade_btn = .{ .x = w -| 6, .y = 0, .w = 1, .h = 1 },
             .close_btn = .{ .x = w -| 4, .y = 0, .w = 1, .h = 1 },
             .rows = .{ .x = 1, .y = 1, .w = w -| 2, .h = body_h },
+            .scrollbar = .{ .x = w -| 1, .y = 1, .w = @min(w, 1), .h = body_h },
             .status = .{ .x = 1, .y = 1 + body_h, .w = w -| 2, .h = 1 },
         };
     }
@@ -69,6 +80,12 @@ pub const Layout = struct {
         if (l.close_btn.contains(p)) return .close;
         if (l.shade_btn.contains(p)) return .shade;
         if (l.titlebar.contains(p)) return .titlebar;
+        if (l.scrollbar.localize(p)) |q| {
+            // A click on the plain border of a playlist that fits is not a
+            // scroll request, because there is no bar there to grab.
+            if (thumbSpan(0, count, l.capacity(), l.scrollbar.h) == null) return .none;
+            return .{ .scrollbar = scrollForThumbTop(q.y, count, l.capacity(), l.scrollbar.h) };
+        }
         if (l.status.contains(p)) return .status;
         if (l.rows.localize(p)) |q| {
             const index = scroll + q.y;
@@ -85,13 +102,19 @@ pub const View = struct {
     scroll: usize = 0,
 };
 
+/// Hold `scroll` inside the range that leaves no blank rows below the last
+/// entry while entries exist above it.
+pub fn clampScroll(scroll: usize, count: usize, capacity: u16) usize {
+    if (capacity == 0 or count == 0) return 0;
+    return @min(scroll, count -| @as(usize, capacity));
+}
+
 /// Keep `scroll` such that `cursor` is visible, moving it as little as
 /// possible. Returns the adjusted scroll.
 pub fn scrollToShow(scroll: usize, cursor: usize, count: usize, capacity: u16) usize {
     if (capacity == 0 or count == 0) return 0;
     const cap: usize = capacity;
 
-    // Never leave blank rows at the bottom while entries exist above.
     const max_scroll = count -| cap;
     var s = @min(scroll, max_scroll);
     if (cursor < s) {
@@ -100,6 +123,49 @@ pub fn scrollToShow(scroll: usize, cursor: usize, count: usize, capacity: u16) u
         s = cursor - cap + 1;
     }
     return @min(s, max_scroll);
+}
+
+/// Where the thumb sits in a `track_h`-row trough.
+pub const Thumb = struct { start: u16, len: u16 };
+
+/// The thumb for `scroll`, or null when every entry already fits and there is
+/// nothing to show. Mutual inverse of `scrollForThumbTop`, so grabbing the
+/// thumb and dragging it tracks the pointer instead of jumping — the same
+/// property `Slider.thumbCol` and `Slider.valueAt` hold for the seek bar.
+pub fn thumbSpan(scroll: usize, count: usize, capacity: u16, track_h: u16) ?Thumb {
+    if (track_h == 0 or capacity == 0 or count <= capacity) return null;
+
+    // Proportional to the fraction on screen, but never shorter than a row:
+    // a 10,000-track playlist still needs a thumb you can see and grab.
+    const proportional = @round(ratio(track_h, capacity, count));
+    const len: u16 = @min(track_h, @max(1, @as(u16, @intFromFloat(proportional))));
+    const travel = track_h - len;
+    const max_scroll = count - capacity;
+    if (travel == 0 or max_scroll == 0) return .{ .start = 0, .len = len };
+
+    const start: u16 = @intFromFloat(@round(ratio(travel, @min(scroll, max_scroll), max_scroll)));
+    return .{ .start = @min(start, travel), .len = len };
+}
+
+/// The scroll position that puts the thumb's top at row `row` of the trough.
+/// Used for a click in the trough and for every frame of a drag.
+pub fn scrollForThumbTop(row: u16, count: usize, capacity: u16, track_h: u16) usize {
+    const thumb = thumbSpan(0, count, capacity, track_h) orelse return 0;
+    const travel = track_h - thumb.len;
+    if (travel == 0) return 0;
+    const max_scroll = count - capacity;
+    const scroll: usize = @intFromFloat(@round(ratio(max_scroll, @min(row, travel), travel)));
+    return @min(scroll, max_scroll);
+}
+
+/// `span * numerator / denominator` in floating point, which is how the
+/// sliders scale their travel too.
+fn ratio(span: usize, numerator: usize, denominator: usize) f32 {
+    const d: f32 = @floatFromInt(denominator);
+    if (d == 0) return 0;
+    const s: f32 = @floatFromInt(span);
+    const n: f32 = @floatFromInt(numerator);
+    return s * n / d;
 }
 
 pub fn draw(p: Painter, l: Layout, v: View, list: *const List) void {
@@ -172,7 +238,25 @@ pub fn draw(p: Painter, l: Layout, v: View, list: *const List) void {
         }
     }
 
+    drawScrollbar(p, l, v, count);
     drawStatus(p, l, v, list);
+}
+
+/// A thumb in the right-hand border, drawn only when the playlist overflows:
+/// a bar that is always full length tells you nothing, and an empty trough on
+/// a three-track playlist is just noise.
+fn drawScrollbar(p: Painter, l: Layout, v: View, count: usize) void {
+    const th = v.theme;
+    const g = th.glyphs;
+    const thumb = thumbSpan(v.scroll, count, l.capacity(), l.scrollbar.h) orelse return;
+
+    const bar = p.sub(l.scrollbar);
+    bar.fillRect(.{ .x = 0, .y = 0, .w = 1, .h = l.scrollbar.h }, g.v, th.onBg(th.track));
+    bar.fillRect(
+        .{ .x = 0, .y = thumb.start, .w = 1, .h = thumb.len },
+        g.thumb,
+        th.onBg(if (v.focused) th.thumb else th.fill),
+    );
 }
 
 /// Clip a title to `avail` columns, ending in an ellipsis so it is obvious
@@ -303,6 +387,86 @@ test "scrollToShow keeps the cursor visible with minimal movement" {
     try testing.expectEqual(@as(usize, 0), scrollToShow(5, 5, 100, 0));
 }
 
+test "clampScroll never leaves blank rows below the entries" {
+    try testing.expectEqual(@as(usize, 90), clampScroll(95, 100, 10));
+    try testing.expectEqual(@as(usize, 5), clampScroll(5, 100, 10));
+    try testing.expectEqual(@as(usize, 0), clampScroll(7, 5, 10));
+    try testing.expectEqual(@as(usize, 0), clampScroll(7, 0, 10));
+    try testing.expectEqual(@as(usize, 0), clampScroll(7, 100, 0));
+}
+
+test "no scrollbar while every entry already fits" {
+    // Nothing to scroll means nothing to draw: an always-full bar says
+    // nothing, and an empty trough on a short playlist is just noise.
+    try testing.expect(thumbSpan(0, 5, 10, 10) == null);
+    try testing.expect(thumbSpan(0, 10, 10, 10) == null);
+    try testing.expect(thumbSpan(0, 0, 10, 10) == null);
+    // Degenerate geometry.
+    try testing.expect(thumbSpan(0, 100, 0, 10) == null);
+    try testing.expect(thumbSpan(0, 100, 10, 0) == null);
+}
+
+test "the thumb spans the trough proportionally and reaches both ends" {
+    // Half the entries visible: half the trough, top to bottom.
+    const top = thumbSpan(0, 20, 10, 10).?;
+    try testing.expectEqual(@as(u16, 0), top.start);
+    try testing.expectEqual(@as(u16, 5), top.len);
+
+    const bottom = thumbSpan(10, 20, 10, 10).?;
+    try testing.expectEqual(@as(u16, 5), bottom.start);
+    try testing.expectEqual(@as(u16, 5), bottom.len);
+
+    // A huge playlist still gets a thumb you can see.
+    const huge = thumbSpan(0, 100_000, 10, 10).?;
+    try testing.expectEqual(@as(u16, 1), huge.len);
+
+    // Scroll past the end clamps rather than running the thumb off.
+    const clamped = thumbSpan(99_999_999, 100_000, 10, 10).?;
+    try testing.expectEqual(@as(u16, 9), clamped.start);
+}
+
+test "the thumb never overflows the trough" {
+    for ([_]u16{ 1, 2, 3, 7, 10, 24 }) |track| {
+        for ([_]usize{ 2, 3, 11, 50, 1457, 100_000 }) |count| {
+            if (count <= track) continue;
+            var scroll: usize = 0;
+            while (scroll <= count) : (scroll += 1 + count / 37) {
+                const t = thumbSpan(scroll, count, track, track) orelse continue;
+                try testing.expect(t.len >= 1);
+                try testing.expect(t.start + t.len <= track);
+            }
+        }
+    }
+}
+
+test "thumbSpan and scrollForThumbTop are mutual inverses at every row" {
+    // The property that stops a drag from jumping: whatever row the pointer
+    // puts the thumb's top on, the thumb redraws with its top on that row.
+    // The trough is always exactly the entry area, so capacity == track_h.
+    for ([_]u16{ 1, 2, 3, 4, 7, 10, 13, 24 }) |track| {
+        for ([_]usize{ 2, 3, 5, 11, 40, 97, 1457, 50_000 }) |count| {
+            if (count <= track) continue;
+            const t = thumbSpan(0, count, track, track).?;
+            const travel = track - t.len;
+            var row: u16 = 0;
+            while (row <= travel) : (row += 1) {
+                const scroll = scrollForThumbTop(row, count, track, track);
+                try testing.expectEqual(row, thumbSpan(scroll, count, track, track).?.start);
+            }
+            // And the ends line up exactly, so the bar can reach both. A
+            // one-row trough is the exception: the thumb fills it and has
+            // nowhere to go, so every row means the same thing.
+            try testing.expectEqual(@as(usize, 0), scrollForThumbTop(0, count, track, track));
+            if (travel > 0) {
+                try testing.expectEqual(
+                    count - track,
+                    scrollForThumbTop(travel, count, track, track),
+                );
+            }
+        }
+    }
+}
+
 test "layout fits its frame and reserves the chrome rows" {
     for ([_]u16{ 4, 10, 16, 40 }) |h| {
         const l = Layout.compute(80, h);
@@ -325,6 +489,32 @@ test "hitTest maps rows through the scroll offset" {
     // Past the end of a short list.
     try testing.expectEqual(Hit.empty, l.hitTest(.{ .x = 10, .y = 5 }, 0, 2));
     try testing.expectEqual(Hit.close, l.hitTest(.{ .x = l.close_btn.x, .y = 0 }, 0, 50));
+    try testing.expectEqual(Hit.status, l.hitTest(.{ .x = 4, .y = l.status.y }, 0, 50));
+}
+
+test "hitTest reads the border as a scrollbar only when there is one" {
+    const l = Layout.compute(80, 10); // 7 entry rows
+    const bar_x = l.scrollbar.x;
+
+    // 50 entries in 7 rows: the border is a scrollbar, and the top of the
+    // trough asks for the top of the list.
+    try testing.expectEqual(
+        Hit{ .scrollbar = 0 },
+        l.hitTest(.{ .x = bar_x, .y = 1 }, 0, 50),
+    );
+    // The bottom of the trough asks for the end of the list.
+    const travel = l.scrollbar.h - thumbSpan(0, 50, l.capacity(), l.scrollbar.h).?.len;
+    try testing.expectEqual(
+        Hit{ .scrollbar = 50 - l.capacity() },
+        l.hitTest(.{ .x = bar_x, .y = 1 + travel }, 0, 50),
+    );
+
+    // A playlist that fits has no bar, so the border is just a border.
+    try testing.expectEqual(Hit.none, l.hitTest(.{ .x = bar_x, .y = 1 }, 0, 3));
+    // The titlebar still wins over the bar's column, and the trough stops
+    // above the status row rather than swallowing the bottom-left corner.
+    try testing.expectEqual(Hit.close, l.hitTest(.{ .x = l.close_btn.x, .y = 0 }, 0, 50));
+    try testing.expectEqual(Hit.none, l.hitTest(.{ .x = bar_x, .y = l.status.y }, 0, 50));
     try testing.expectEqual(Hit.status, l.hitTest(.{ .x = 4, .y = l.status.y }, 0, 50));
 }
 
@@ -496,6 +686,49 @@ test "scrolled view starts at the right entry" {
     // the column's left edge, with the dot in the same place throughout.
     try testing.expect(std.mem.indexOf(u8, text, " 1. Track0") == null);
     try testing.expect(std.mem.indexOf(u8, text, "25. Track24") == null);
+}
+
+test "a long playlist draws a thumb in its border, a short one does not" {
+    const gpa = testing.allocator;
+
+    var long = List.init(gpa, 1);
+    defer long.deinit();
+    var buf: [32]u8 = undefined;
+    for (0..60) |i| {
+        const name = try std.fmt.bufPrint(&buf, "Track{d}", .{i});
+        try long.append(name, name, 60);
+    }
+
+    const l = Layout.compute(40, 8); // 5 entry rows
+    var s = try screen.Screen.init(gpa, 40, 8);
+    defer s.deinit();
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{ .theme = .classic, .scroll = 0 }, &long);
+
+    // The thumb is at the top of the trough, and the trough fills the rest.
+    const bar_x = l.scrollbar.x;
+    try testing.expectEqual(Theme.classic.glyphs.thumb, s.get(bar_x, 1).?.cp);
+    try testing.expectEqual(Theme.classic.glyphs.v, s.get(bar_x, l.scrollbar.h).?.cp);
+
+    // Scrolled to the end, the thumb is at the bottom of the trough.
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{ .theme = .classic, .scroll = 55 }, &long);
+    try testing.expectEqual(
+        Theme.classic.glyphs.thumb,
+        s.get(bar_x, l.scrollbar.h).?.cp,
+    );
+    try testing.expectEqual(Theme.classic.glyphs.v, s.get(bar_x, 1).?.cp);
+
+    // A playlist that fits leaves the border alone.
+    var short = List.init(gpa, 1);
+    defer short.deinit();
+    try short.append("/m/a.mp3", "A", 60);
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{ .theme = .classic }, &short);
+    var y: u16 = 1;
+    while (y <= l.scrollbar.h) : (y += 1) {
+        try testing.expectEqual(Theme.classic.glyphs.v, s.get(bar_x, y).?.cp);
+    }
 }
 
 test "a window too small to hold a row does not panic" {

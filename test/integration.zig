@@ -11,6 +11,12 @@
 //!
 //! The audio device is the null backend, so these need no sound card and
 //! run unchanged on a CI container.
+//!
+//! `Term` replays the output into a cell grid, because the renderer emits
+//! only the cells that changed: a playlist row that reads "30. Scroll 30"
+//! after a scroll is assembled from whatever differed from the frame before,
+//! so it need never appear as contiguous bytes in the stream. Anything about
+//! layout or about a view staying put has to be asked of the screen.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -153,9 +159,13 @@ const testing = std.testing;
 const tone_seconds: u32 = 12;
 
 fn writeTone(dir: std.Io.Dir, name: []const u8) !void {
+    return writeToneSeconds(dir, name, tone_seconds);
+}
+
+fn writeToneSeconds(dir: std.Io.Dir, name: []const u8, seconds: u32) !void {
     const gpa = testing.allocator;
     const rate: u32 = 48000;
-    const frames: u32 = rate * tone_seconds;
+    const frames: u32 = rate * seconds;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -192,6 +202,135 @@ fn writeTone(dir: std.Io.Dir, name: []const u8) !void {
     }
     try dir.writeFile(testing.io, .{ .sub_path = name, .data = out.items });
 }
+
+/// Replays rendered output into a cell grid.
+///
+/// Only what the renderer actually emits is handled: absolute cursor
+/// positioning, erase-display, and printable text. Everything else — the
+/// synchronised-update marks, the SGR colours, the private modes — is
+/// skipped, which is right, because none of it moves a glyph. Wide glyphs
+/// occupy one cell here rather than two; nothing asserted on depends on the
+/// difference.
+const Term = struct {
+    cells: [Session.rows][Session.cols]u21,
+    x: u16 = 0,
+    y: u16 = 0,
+
+    fn init() Term {
+        return .{ .cells = @splat(@splat(' ')) };
+    }
+
+    fn feed(t: *Term, bytes: []const u8) void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const c = bytes[i];
+            if (c == 0x1b) {
+                i += 1;
+                if (i < bytes.len and bytes[i] == '[') {
+                    i += 1;
+                    const start = i;
+                    // Parameter and intermediate bytes, then one final byte.
+                    while (i < bytes.len and bytes[i] < 0x40) i += 1;
+                    if (i >= bytes.len) return;
+                    t.csi(bytes[start..i], bytes[i]);
+                    i += 1;
+                } else if (i < bytes.len) {
+                    i += 1; // a two-byte escape we do not care about
+                }
+                continue;
+            }
+            if (c == '\r') {
+                t.x = 0;
+                i += 1;
+                continue;
+            }
+            if (c == '\n') {
+                t.y +|= 1;
+                t.x = 0;
+                i += 1;
+                continue;
+            }
+            const len = std.unicode.utf8ByteSequenceLength(c) catch {
+                i += 1;
+                continue;
+            };
+            if (i + len > bytes.len) return;
+            const cp = std.unicode.utf8Decode(bytes[i..][0..len]) catch ' ';
+            if (cp >= ' ' and t.y < Session.rows and t.x < Session.cols) {
+                t.cells[t.y][t.x] = cp;
+            }
+            t.x +|= 1;
+            i += len;
+        }
+    }
+
+    fn csi(t: *Term, params: []const u8, final: u8) void {
+        switch (final) {
+            'H', 'f' => {
+                var it = std.mem.splitScalar(u8, params, ';');
+                const row = std.fmt.parseInt(u16, it.next() orelse "1", 10) catch 1;
+                const col = std.fmt.parseInt(u16, it.next() orelse "1", 10) catch 1;
+                t.y = row -| 1;
+                t.x = col -| 1;
+            },
+            'J' => t.cells = @splat(@splat(' ')),
+            else => {},
+        }
+    }
+
+    fn cell(t: *const Term, x: u16, y: u16) u21 {
+        if (y >= Session.rows or x >= Session.cols) return ' ';
+        return t.cells[y][x];
+    }
+
+    /// The first row whose text contains `needle`, or null.
+    fn rowContaining(t: *const Term, needle: []const u8) ?u16 {
+        var buf: [Session.cols * 4]u8 = undefined;
+        var y: u16 = 0;
+        while (y < Session.rows) : (y += 1) {
+            if (std.mem.indexOf(u8, t.rowText(y, &buf), needle) != null) return y;
+        }
+        return null;
+    }
+
+    fn contains(t: *const Term, needle: []const u8) bool {
+        return t.rowContaining(needle) != null;
+    }
+
+    /// Does any row from `from` to `to` inclusive contain `needle`? Used to
+    /// ask about one window: a track title is drawn in the main window's
+    /// marquee as well as in the playlist, so "is it on screen" is too
+    /// blunt a question to tell where the playlist is scrolled to.
+    fn containsBetween(t: *const Term, from: u16, to: u16, needle: []const u8) bool {
+        var buf: [Session.cols * 4]u8 = undefined;
+        var y: u16 = from;
+        while (y <= to and y < Session.rows) : (y += 1) {
+            if (std.mem.indexOf(u8, t.rowText(y, &buf), needle) != null) return true;
+        }
+        return false;
+    }
+
+    fn rowText(t: *const Term, y: u16, buf: []u8) []const u8 {
+        var n: usize = 0;
+        for (t.cells[y]) |cp| {
+            n += std.unicode.utf8Encode(cp, buf[n..]) catch 0;
+        }
+        return buf[0..n];
+    }
+
+    /// The rightmost non-blank column of the row whose text contains
+    /// `title`, which for a window titlebar is where its frame sits — and so
+    /// where the scrollbar is drawn.
+    fn frameRight(t: *const Term, title: []const u8) ?u16 {
+        const y = t.rowContaining(title) orelse return null;
+        var x: u16 = Session.cols;
+        while (x > 0) {
+            x -= 1;
+            if (t.cell(x, y) != ' ') return x;
+        }
+        return null;
+    }
+};
 
 /// Run the player on a throwaway track and return everything it drew.
 fn runPlayer(gpa: std.mem.Allocator, keys: []const u8, settle_ms: u64) !struct {
@@ -305,6 +444,109 @@ test "the analyzer renders real audio, not just its baseline" {
 // That the device really pulls audio through the whole chain is proved
 // properly in src/audio/engine.zig, where the no-device engine's output is
 // read back and its level asserted.
+
+/// A playlist long enough to need scrolling. The tones are a fraction of a
+/// second because nothing here measures playback, only what gets drawn.
+fn runLongPlaylist(gpa: std.mem.Allocator, keys: []const u8) !struct {
+    output: []u8,
+    exit: ?u8,
+} {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var name_buf: [32]u8 = undefined;
+    for (1..41) |i| {
+        const name = try std.fmt.bufPrint(&name_buf, "Scroll {d:0>2}.wav", .{i});
+        try writeToneSeconds(tmp.dir, name, 1);
+    }
+
+    const root_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root_path);
+    const root = try gpa.dupeZ(u8, root_path);
+    defer gpa.free(root);
+
+    var session = try Session.start(&.{
+        exe_path,
+        "--null-audio",
+        "--no-config",
+        "--volume",
+        "50",
+        root.ptr,
+    });
+    defer session.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try session.pump(&out, gpa, 1500);
+    if (keys.len > 0) {
+        session.send(keys);
+        // Long enough that a view which snaps back to the cursor has had
+        // many frames in which to do it.
+        try session.pump(&out, gpa, 1200);
+    }
+    session.send("q");
+    try session.pump(&out, gpa, 600);
+
+    return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
+}
+
+/// Eight notches of the wheel over the playlist, in SGR mouse reporting.
+const wheel_down_8 = "\x1b[<65;20;22M" ** 8;
+/// Enough to run it past the end, so the view lands on the last page.
+const wheel_down_40 = "\x1b[<65;20;22M" ** 40;
+
+test "a scrolled playlist stays where it was put" {
+    const gpa = testing.allocator;
+    const r = try runLongPlaylist(gpa, wheel_down_8);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+
+    // The view used to be recentred on the cursor every single frame, so a
+    // wheel scroll was undone before it could be seen and the playlist sat
+    // immovably at the top unless the cursor itself had moved.
+    const top = term.rowContaining(" Playlist ") orelse return error.NoPlaylistWindow;
+    const bottom = term.rowContaining("40 tracks").?;
+    try testing.expect(term.containsBetween(top, bottom, "Scroll 30"));
+    try testing.expect(!term.containsBetween(top, bottom, "Scroll 02"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
+test "the scrollbar thumb sits where the view is" {
+    const gpa = testing.allocator;
+
+    // Unscrolled: the thumb is at the top of the trough, and the rows below
+    // it are plain border.
+    {
+        const r = try runLongPlaylist(gpa, "");
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+
+        const bar_x = term.frameRight(" Playlist ") orelse return error.NoPlaylistWindow;
+        const title_y = term.rowContaining(" Playlist ").?;
+        const last_y = term.rowContaining("40 tracks").? - 1;
+        try testing.expectEqual(@as(u21, '\u{2588}'), term.cell(bar_x, title_y + 1)); // █
+        try testing.expectEqual(@as(u21, '\u{2502}'), term.cell(bar_x, last_y)); // │
+    }
+
+    // Scrolled to the end: the same thumb, at the other end of the trough.
+    {
+        const r = try runLongPlaylist(gpa, wheel_down_40);
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+
+        const bar_x = term.frameRight(" Playlist ") orelse return error.NoPlaylistWindow;
+        const title_y = term.rowContaining(" Playlist ").?;
+        const last_y = term.rowContaining("40 tracks").? - 1;
+        try testing.expect(term.containsBetween(title_y, last_y, "Scroll 40"));
+        try testing.expectEqual(@as(u21, '\u{2502}'), term.cell(bar_x, title_y + 1));
+        try testing.expectEqual(@as(u21, '\u{2588}'), term.cell(bar_x, last_y));
+    }
+}
 
 test "usage and device listing exit with the right codes" {
     const gpa = testing.allocator;
