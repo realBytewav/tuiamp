@@ -189,6 +189,11 @@ pub const Theme = struct {
         break :blk t;
     };
 
+    /// Every theme compiled in. The catalog lists these alongside whatever
+    /// the user has dropped in their theme directory, so the two cannot
+    /// drift apart.
+    pub const builtin_names = [_][]const u8{ "classic", "ascii" };
+
     pub fn byName(name: []const u8) ?Theme {
         const eq = std.mem.eql;
         if (eq(u8, name, "classic")) return .classic;
@@ -231,6 +236,14 @@ test "byName round-trips the built-ins" {
     try std.testing.expectEqualStrings("classic", Theme.byName("classic").?.name);
     try std.testing.expectEqualStrings("ascii", Theme.byName("ascii").?.name);
     try std.testing.expect(Theme.byName("nope") == null);
+}
+
+test "every name in builtin_names actually resolves" {
+    // Otherwise the picker offers a theme that cannot be selected.
+    for (Theme.builtin_names) |name| {
+        const t = Theme.byName(name) orelse return error.UnknownBuiltin;
+        try std.testing.expectEqualStrings(name, t.name);
+    }
 }
 
 // --- loading from disk -----------------------------------------------------
@@ -577,4 +590,210 @@ test "the theme files shipped in themes/ parse and match the built-ins" {
         try std.testing.expectEqualStrings(builtin.glyphs.prev, loaded.glyphs.prev);
         try std.testing.expectEqualStrings(builtin.glyphs.eject, loaded.glyphs.eject);
     }
+}
+
+// --- the catalog -----------------------------------------------------------
+
+/// Every theme the user could choose: the built-ins, plus each `.zon` file in
+/// `<config_dir>/themes/`. One entry per name — a file shadows a built-in it
+/// shares a name with, which is what `resolve` does too, so the list never
+/// offers the same name twice.
+///
+/// Names are owned here and freed on the next `refresh`, so a caller that
+/// keeps one past that point must copy it. Resolved themes borrow the arena
+/// passed to `themeAt`, which has to outlive them.
+pub const Catalog = struct {
+    gpa: Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    pub const Entry = struct {
+        name: []u8,
+        /// Filled in the first time this theme is asked for. Parsing the
+        /// whole directory up front would read every file to draw one list,
+        /// and the user is going to look at two of them.
+        theme: ?Theme = null,
+    };
+
+    /// A theme directory with more files than this is not a theme directory,
+    /// and a picker is not the place to find that out slowly.
+    pub const max_themes = 128;
+
+    pub fn init(gpa: Allocator) Catalog {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(c: *Catalog) void {
+        c.clear();
+        c.entries.deinit(c.gpa);
+        c.* = undefined;
+    }
+
+    fn clear(c: *Catalog) void {
+        for (c.entries.items) |e| c.gpa.free(e.name);
+        c.entries.clearRetainingCapacity();
+    }
+
+    pub fn len(c: Catalog) usize {
+        return c.entries.items.len;
+    }
+
+    pub fn nameAt(c: Catalog, i: usize) []const u8 {
+        return c.entries.items[i].name;
+    }
+
+    pub fn indexOf(c: Catalog, name: []const u8) ?usize {
+        for (c.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) return i;
+        }
+        return null;
+    }
+
+    /// Rebuild the list, so a theme dropped into the directory while tuiamp
+    /// is running turns up without a restart. Best effort throughout: an
+    /// unreadable directory just means the built-ins, because failing to
+    /// list themes should never be worse than having none to list.
+    pub fn refresh(c: *Catalog, io: Io, config_dir: ?[]const u8) void {
+        c.clear();
+        for (Theme.builtin_names) |name| c.add(name);
+        if (config_dir) |dir| c.addDirectory(io, dir);
+        std.mem.sort(Entry, c.entries.items, {}, lessByName);
+    }
+
+    /// Resolve entry `i`, remembering the result so flipping up and down the
+    /// list parses each theme once rather than once per keypress.
+    pub fn themeAt(
+        c: *Catalog,
+        arena: Allocator,
+        io: Io,
+        config_dir: ?[]const u8,
+        i: usize,
+    ) ?Theme {
+        if (i >= c.entries.items.len) return null;
+        const e = &c.entries.items[i];
+        if (e.theme) |t| return t;
+        const t = resolve(arena, io, config_dir, e.name) orelse return null;
+        e.theme = t;
+        return t;
+    }
+
+    /// Add one name if it is new and there is room. Public so a caller can
+    /// build a list without a filesystem behind it.
+    pub fn add(c: *Catalog, name: []const u8) void {
+        if (name.len == 0 or c.entries.items.len >= max_themes) return;
+        if (c.indexOf(name) != null) return;
+        const owned = c.gpa.dupe(u8, name) catch return;
+        c.entries.append(c.gpa, .{ .name = owned }) catch c.gpa.free(owned);
+    }
+
+    fn addDirectory(c: *Catalog, io: Io, config_dir: []const u8) void {
+        const path = std.fs.path.join(c.gpa, &.{ config_dir, "themes" }) catch return;
+        defer c.gpa.free(path);
+
+        var dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
+
+        var it = dir.iterate();
+        // `entry.name` is only valid until the next call, and `add` copies.
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind == .directory) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".zon")) continue;
+            c.add(entry.name[0 .. entry.name.len - ".zon".len]);
+        }
+    }
+
+    fn lessByName(_: void, a: Entry, b: Entry) bool {
+        return std.mem.lessThan(u8, a.name, b.name);
+    }
+};
+
+test "the catalog lists the built-ins with no theme directory" {
+    const gpa = std.testing.allocator;
+    var c: Catalog = .init(gpa);
+    defer c.deinit();
+
+    c.refresh(std.testing.io, null);
+    try std.testing.expectEqual(Theme.builtin_names.len, c.len());
+    // Alphabetical, so the list does not reorder itself between openings.
+    try std.testing.expectEqualStrings("ascii", c.nameAt(0));
+    try std.testing.expectEqualStrings("classic", c.nameAt(1));
+    try std.testing.expectEqual(@as(?usize, 1), c.indexOf("classic"));
+    try std.testing.expectEqual(@as(?usize, null), c.indexOf("amber"));
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const t = c.themeAt(arena_state.allocator(), std.testing.io, null, 1).?;
+    try std.testing.expectEqualStrings("classic", t.name);
+    // Out of range is null rather than a crash.
+    try std.testing.expect(c.themeAt(arena_state.allocator(), std.testing.io, null, 99) == null);
+}
+
+test "the catalog picks up theme files and does not list a name twice" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "themes");
+
+    const minimal =
+        \\.{
+        \\    .name = "amber",
+        \\    .bg = 0, .frame = 1, .frame_focus = 2, .title_bg = 3, .title_fg = 4,
+        \\    .title_fg_dim = 5, .lcd_bg = 6, .lcd_fg = 7, .lcd_dim = 8, .text = 9,
+        \\    .text_dim = 10, .text_bright = 11, .list_current = 12,
+        \\    .list_sel_bg = 13, .list_sel_fg = 14, .track = 15, .fill = 16,
+        \\    .thumb = 17, .button = 18, .button_active = 19, .vis_lo = 20,
+        \\    .vis_mid = 21, .vis_hi = 22, .vis_peak = 23,
+        \\    .glyphs = .{
+        \\        .bars = .{ " ", "a", "b", "c", "d", "e", "f", "g", "h" },
+        \\        .hbars = .{ " ", "a", "b", "c", "d", "e", "f", "g", "h" },
+        \\        .h = "-", .v = "|", .tl = "+", .tr = "+", .bl = "+", .br = "+",
+        \\        .track = "-", .thumb = "@", .peak = "^", .scope = "#",
+        \\        .scope_hi = "-", .scope_lo = "_", .colon = ":",
+        \\        .win_shade = "_", .win_close = "x", .sep = " - ",
+        \\        .now_playing = ">", .prev = "<<", .play = ">", .pause = "||",
+        \\        .stop = "[]", .next = ">>", .eject = "^",
+        \\    },
+        \\}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "themes/amber.zon", .data = minimal });
+    // A file named after a built-in shadows it rather than appearing twice.
+    try tmp.dir.writeFile(io, .{ .sub_path = "themes/ascii.zon", .data = minimal });
+    // Anything that is not a theme file is ignored.
+    try tmp.dir.writeFile(io, .{ .sub_path = "themes/notes.txt", .data = "hello" });
+
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var c: Catalog = .init(gpa);
+    defer c.deinit();
+    c.refresh(io, root);
+
+    try std.testing.expectEqual(@as(usize, 3), c.len());
+    try std.testing.expectEqualStrings("amber", c.nameAt(0));
+    try std.testing.expectEqualStrings("ascii", c.nameAt(1));
+    try std.testing.expectEqualStrings("classic", c.nameAt(2));
+    try std.testing.expect(c.indexOf("notes") == null);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The file resolves, and the one shadowing "ascii" wins over the
+    // built-in, exactly as passing --theme ascii would.
+    try std.testing.expectEqualStrings("amber", c.themeAt(arena, io, root, 0).?.name);
+    try std.testing.expectEqual(@as(u21, '@'), c.themeAt(arena, io, root, 1).?.glyphs.thumb);
+    try std.testing.expectEqualStrings("classic", c.themeAt(arena, io, root, 2).?.name);
+
+    // Refreshing twice is stable rather than accumulating.
+    c.refresh(io, root);
+    try std.testing.expectEqual(@as(usize, 3), c.len());
+}
+
+test "a refresh that finds nothing still leaves the built-ins" {
+    const gpa = std.testing.allocator;
+    var c: Catalog = .init(gpa);
+    defer c.deinit();
+    c.refresh(std.testing.io, "/definitely/not/here");
+    try std.testing.expectEqual(Theme.builtin_names.len, c.len());
 }

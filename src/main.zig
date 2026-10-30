@@ -45,6 +45,7 @@ const usage =
     \\  t elapsed/remaining                w        windowshade
     \\  g cycle the analyzer               q        quit
     \\  alt+e playlist                     alt+g    equalizer
+    \\  ctrl+p settings                    ?        keys, then what it does
     \\
     \\playlist (when focused):
     \\  up/down select   shift+up/down reorder   enter play   del remove
@@ -189,13 +190,18 @@ pub fn main(init: std.process.Init) !u8 {
     try tty.enter();
     defer tty.deinit();
 
-    var app = try App.init(gpa, io, &tty, &player, &list, tap, eq_shared, theme, cfg);
+    var app = try App.init(gpa, io, &tty, &player, &list, tap, eq_shared, .{
+        .arena = arena,
+        .config_dir = config_dir,
+        .name = theme_name,
+        .resolved = theme,
+    }, cfg);
     defer app.deinit();
 
     app.start();
     try app.run();
 
-    if (config_dir) |dir| config_mod.save(gpa, io, dir, app.currentConfig(theme_name));
+    if (config_dir) |dir| config_mod.save(gpa, io, dir, app.currentConfig());
     return 0;
 }
 

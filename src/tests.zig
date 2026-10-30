@@ -4,6 +4,7 @@ comptime {
     _ = @import("ui/help.zig");
     _ = @import("config.zig");
     _ = @import("ui/eq_window.zig");
+    _ = @import("ui/settings_window.zig");
     _ = @import("audio/eq.zig");
     _ = @import("meta/tags.zig");
     _ = @import("meta/flac.zig");

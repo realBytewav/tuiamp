@@ -52,8 +52,9 @@ tuiamp --volume 25 --theme ascii ~/Music/Album
 tuiamp --devices          # which backend and output device it will use
 ```
 
-Press `?` for the keymap. Settings are saved to
-`~/.config/tuiamp/config.zon` on exit; `--no-config` leaves it alone.
+Press `?` for the keymap, then again for what it can do. `ctrl+p` opens
+settings. Settings are saved to `~/.config/tuiamp/config.zon` on exit;
+`--no-config` leaves it alone.
 
 ## Keys
 
@@ -65,11 +66,12 @@ space       play / pause                           alt+e  playlist
 left/right  seek 5s        up/down  volume         alt+g  equalizer
 s shuffle   r repeat       j jump to playing       w      windowshade
 t elapsed / remaining      g cycle analyzer        q      quit
+? keys, then what it does  ctrl+p settings
 ```
 
-Mouse: drag the seek, volume, balance and equalizer sliders; click the
-transport buttons; double-click a playlist row; the wheel sets volume, or
-scrolls the playlist.
+Mouse: drag the seek, volume, balance, equalizer and playlist-scroll
+sliders; click the transport buttons; double-click a playlist row; the wheel
+sets volume, or scrolls the playlist.
 
 ## What it does
 
@@ -80,6 +82,8 @@ scrolls the playlist.
   otherwise. A 1,457-track library loads in about half a second.
 - **Playlist**: recursive directory scan, m3u/m3u8/pls read and write,
   reordering, shuffle as a permutation over a fixed view, repeat off/all/one.
+  The scrollbar lives in the window's right-hand border, where Winamp put
+  its own, so it costs no title width.
 - **Visualizer**: a passthrough node taps the audio into a lock-free ring; the
   UI runs a windowed FFT over it and draws a log-spaced spectrum with falling
   peak caps, or an oscilloscope at half-block resolution.
@@ -87,7 +91,9 @@ scrolls the playlist.
   chain of peaking biquads, with Winamp's stock presets.
 - **Themes**: palette and glyph set in a ZON file. Two are built in
   (`classic`, `ascii`); copy one from `share/tuiamp/themes/` into
-  `~/.config/tuiamp/themes/` and pass its name to `--theme`.
+  `~/.config/tuiamp/themes/` and pass its name to `--theme`, or pick it from
+  `ctrl+p`, which lists the built-ins alongside whatever is in that
+  directory and applies each one as you move down the list.
 
 ## What it does not do
 
@@ -119,7 +125,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 229 unit + 6 end-to-end tests
+zig build test            # 251 unit + 10 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries
@@ -138,7 +144,12 @@ while playing nothing at all.
 The **end-to-end tests** allocate a pseudo-terminal, exec the real binary on
 it, type at it, and assert on what it draws and how it exits — that the
 window appears, that keys reach it, that it keeps redrawing while playing,
-and that it hands the terminal back. They run against `--null-audio`, which
+that a scrolled playlist stays where it was put, that `ctrl+p` really
+repaints the player in another theme, and that it hands the terminal back.
+They replay the output into a cell grid first, because the renderer emits
+only the cells that changed: a playlist row reading `30. Scroll 30` after a
+scroll is assembled from whatever differed from the frame before and need
+never appear as contiguous bytes in the stream. They run against `--null-audio`, which
 selects miniaudio's null device. That device is reachable only when named
 explicitly, never as a fallback, so it can never become the reason your
 music is silent.

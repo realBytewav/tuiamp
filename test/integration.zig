@@ -548,6 +548,105 @@ test "the scrollbar thumb sits where the view is" {
     }
 }
 
+/// Like `runPlayer`, but the screen is captured before the quit key is sent,
+/// so a test can assert on a dialog that is still open. The teardown sends
+/// escape first, because a modal dialog deliberately swallows `q` — a stray
+/// keypress while picking a theme should not close the player.
+fn runPlayerModal(gpa: std.mem.Allocator, keys: []const u8) !struct {
+    output: []u8,
+    exit: ?u8,
+} {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTone(tmp.dir, "tone.wav");
+
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const track = try std.fs.path.joinZ(gpa, &.{ root, "tone.wav" });
+    defer gpa.free(track);
+
+    var session = try Session.start(&.{
+        exe_path,
+        "--null-audio",
+        "--no-config",
+        "--volume",
+        "50",
+        track.ptr,
+    });
+    defer session.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try session.pump(&out, gpa, 2000);
+    session.send(keys);
+    try session.pump(&out, gpa, 600);
+
+    // Teardown goes to a buffer the caller never sees, so the screen it
+    // asserts on is the one the keys produced.
+    var teardown: std.ArrayList(u8) = .empty;
+    defer teardown.deinit(gpa);
+    session.send("\x1b");
+    try session.pump(&teardown, gpa, 300);
+    session.send("q");
+    try session.pump(&teardown, gpa, 600);
+
+    return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
+}
+
+/// Ctrl+P, as a terminal sends it.
+const ctrl_p = "\x10";
+const arrow_up = "\x1b[A";
+
+test "ctrl+p opens the settings dialog and lists the themes" {
+    const gpa = testing.allocator;
+    const r = try runPlayerModal(gpa, ctrl_p);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+
+    try testing.expect(term.contains(" settings "));
+    try testing.expect(term.contains("THEME"));
+    // Both built-ins are offered. There is no theme directory under
+    // --no-config, so these are all there is to list.
+    try testing.expect(term.contains("ascii"));
+    try testing.expect(term.contains("classic"));
+    // A modal dialog has to say how to leave.
+    try testing.expect(term.contains("esc cancel"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
+test "picking a theme repaints the player, and escape puts it back" {
+    const gpa = testing.allocator;
+
+    // The glyph set is the visible half of a theme, so switching to `ascii`
+    // turns every box corner into a plus. Nothing else in the program does
+    // that, which makes it the honest test of whether a preview was really
+    // applied rather than merely drawn in the list.
+    {
+        const r = try runPlayerModal(gpa, ctrl_p ++ arrow_up);
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+        try testing.expect(term.contains("+- tuiamp"));
+        try testing.expect(!term.contains("\u{250c}\u{2500} tuiamp"));
+        try testing.expectEqual(@as(?u8, 0), r.exit);
+    }
+
+    // And escape is a real cancel: the player comes back as it was, not as
+    // whatever the cursor happened to be resting on.
+    {
+        const r = try runPlayerModal(gpa, ctrl_p ++ arrow_up ++ "\x1b");
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+        try testing.expect(term.contains("\u{250c}\u{2500} tuiamp"));
+        try testing.expect(!term.contains(" settings "));
+        try testing.expectEqual(@as(?u8, 0), r.exit);
+    }
+}
+
 test "usage and device listing exit with the right codes" {
     const gpa = testing.allocator;
 

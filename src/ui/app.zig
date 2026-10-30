@@ -21,10 +21,12 @@ const screen_mod = @import("../term/screen.zig");
 const Screen = screen_mod.Screen;
 const input = @import("../term/input.zig");
 const tty_mod = @import("../term/tty.zig");
-const Theme = @import("theme.zig").Theme;
+const theme_mod = @import("theme.zig");
+const Theme = theme_mod.Theme;
 const main_window = @import("main_window.zig");
 const playlist_window = @import("playlist_window.zig");
 const eq_window = @import("eq_window.zig");
+const settings_window = @import("settings_window.zig");
 const help = @import("help.zig");
 const eq = @import("../audio/eq.zig");
 const Marquee = @import("widgets/marquee.zig").Marquee;
@@ -58,6 +60,24 @@ const Drag = union(enum) {
 };
 const Focus = enum { main, eq, playlist };
 
+/// Everything needed to put a different theme on screen while running, which
+/// is more than the theme itself: the picker has to be able to find the
+/// others and parse them.
+///
+/// `arena` outlives the app, because a loaded theme's name and glyph strings
+/// are borrowed from wherever it was parsed. Each theme is parsed at most
+/// once per listing, so previewing is bounded rather than growing the arena
+/// with every keypress.
+pub const ThemeSource = struct {
+    arena: Allocator,
+    /// Null with `--no-config`, which also means no theme directory.
+    config_dir: ?[]const u8,
+    /// The name `resolved` came from, which is what gets written back to the
+    /// config. The app holds a resolved theme, which no longer knows it.
+    name: []const u8,
+    resolved: Theme,
+};
+
 /// One keypress of a slider, in decibels. Matches the half-row resolution
 /// the EQ window draws at, so every press visibly moves the thumb.
 const eq_key_step: f32 = 1.5;
@@ -85,6 +105,13 @@ pub const App = struct {
     /// SIGWINCH as a file descriptor, so resize arrives through poll.
     winch_fd: posix.fd_t,
 
+    /// Where a theme chosen at runtime is parsed, and where to look for the
+    /// ones on disk.
+    arena: Allocator,
+    config_dir: ?[]const u8,
+    theme_name: []const u8,
+    themes: theme_mod.Catalog,
+
     quit: bool = false,
     needs_resize: bool = true,
     marquee: Marquee = .{},
@@ -106,6 +133,12 @@ pub const App = struct {
     follow_cursor: bool = true,
     /// Null when the overlay is closed; `?` walks the pages and then closes.
     help_page: ?help.Page = null,
+    settings_open: bool = false,
+    settings_cursor: usize = 0,
+    settings_scroll: usize = 0,
+    /// What to put back if the picker is cancelled. The theme under the
+    /// cursor is applied as you move, so there has to be a way home.
+    theme_before_settings: ?struct { theme: Theme, name: []const u8 } = null,
     drag: Drag = .none,
     frames: u32 = 0,
 
@@ -124,7 +157,7 @@ pub const App = struct {
         list: *List,
         tap: *engine_mod.VisTap,
         eq_shared: *eq.Node.Shared,
-        theme: Theme,
+        themes: ThemeSource,
         cfg: config_mod.Config,
     ) !App {
         const size = try tty.size();
@@ -146,7 +179,7 @@ pub const App = struct {
         const winch_fd = try posix.signalfd(-1, &mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
 
         var m: Marquee = .{};
-        m.separator = theme.glyphs.sep;
+        m.separator = themes.resolved.glyphs.sep;
 
         var app: App = .{
             .gpa = gpa,
@@ -155,7 +188,11 @@ pub const App = struct {
             .screen = sc,
             .player = player,
             .list = list,
-            .theme = theme,
+            .theme = themes.resolved,
+            .arena = themes.arena,
+            .config_dir = themes.config_dir,
+            .theme_name = themes.name,
+            .themes = .init(gpa),
             .winch_fd = winch_fd,
             .marquee = m,
             .playlist_open = list.len() > 1,
@@ -200,11 +237,10 @@ pub const App = struct {
         a.player.setBalance(cfg.balanceFraction());
     }
 
-    /// Capture the current state for saving. `theme_name` is passed in
-    /// because the app holds a resolved theme, not the name it came from.
-    pub fn currentConfig(a: *App, theme_name: []const u8) config_mod.Config {
+    /// Capture the current state for saving.
+    pub fn currentConfig(a: *App) config_mod.Config {
         var cfg: config_mod.Config = .{
-            .theme = theme_name,
+            .theme = a.theme_name,
             .show_remaining = a.show_remaining,
             .shaded = a.shaded,
             .eq_open = a.eq_open,
@@ -231,6 +267,7 @@ pub const App = struct {
 
     pub fn deinit(a: *App) void {
         _ = linux.close(a.winch_fd);
+        a.themes.deinit();
         a.gpa.destroy(a.vis_window);
         a.gpa.destroy(a.analyzer);
         a.screen.deinit();
@@ -413,10 +450,20 @@ pub const App = struct {
                     // Repaint from scratch, for when something else has
                     // written over the terminal.
                     'l' => a.screen.invalidate(),
+                    // Winamp's preferences key.
+                    'p' => a.toggleSettings(),
                     else => {},
                 },
                 else => {},
             }
+            return;
+        }
+
+        // The settings dialog is modal: it wants the arrow keys, which
+        // otherwise move the volume, and a stray `q` while picking a theme
+        // should not quit the player.
+        if (a.settings_open) {
+            a.settingsKey(key);
             return;
         }
 
@@ -563,6 +610,85 @@ pub const App = struct {
         a.help_page = if (a.help_page) |page| page.next() else .keys;
     }
 
+    const SettingsExit = enum { keep, cancel };
+
+    fn toggleSettings(a: *App) void {
+        if (a.settings_open) {
+            a.closeSettings(.keep);
+            return;
+        }
+        // One overlay at a time; two stacked dialogs is not a look Winamp
+        // ever had.
+        a.help_page = null;
+        // Re-listed on every opening, so a theme file dropped in while
+        // tuiamp is running turns up without a restart.
+        a.themes.refresh(a.io, a.config_dir);
+        a.settings_cursor = a.themes.indexOf(a.theme_name) orelse 0;
+        a.settings_scroll = 0;
+        a.theme_before_settings = .{ .theme = a.theme, .name = a.theme_name };
+        a.settings_open = true;
+    }
+
+    fn closeSettings(a: *App, how: SettingsExit) void {
+        if (how == .cancel) {
+            if (a.theme_before_settings) |prev| a.applyTheme(prev.theme, prev.name);
+        }
+        a.theme_before_settings = null;
+        a.settings_open = false;
+    }
+
+    fn settingsKey(a: *App, key: input.Key) void {
+        const count = a.themes.len();
+        switch (key) {
+            .up => a.moveSettingsCursor(-1),
+            .down => a.moveSettingsCursor(1),
+            .page_up => a.moveSettingsCursor(-@as(i32, settings_window.list_rows)),
+            .page_down => a.moveSettingsCursor(settings_window.list_rows),
+            .home => a.setSettingsCursor(0),
+            .end => a.setSettingsCursor(count -| 1),
+            .enter => a.closeSettings(.keep),
+            .escape => a.closeSettings(.cancel),
+            else => {},
+        }
+    }
+
+    fn moveSettingsCursor(a: *App, delta: i32) void {
+        const current: i32 = @intCast(@min(a.settings_cursor, std.math.maxInt(i32)));
+        a.setSettingsCursor(@intCast(@max(current + delta, 0)));
+    }
+
+    fn setSettingsCursor(a: *App, index: usize) void {
+        const count = a.themes.len();
+        if (count == 0) return;
+        a.settings_cursor = @min(index, count - 1);
+        a.previewTheme();
+    }
+
+    /// Put the theme under the cursor on screen straight away. A palette is
+    /// the one setting whose name tells you nothing, and Winamp applied a
+    /// skin the moment you picked it. A theme that fails to parse leaves the
+    /// current one alone rather than blanking the player.
+    fn previewTheme(a: *App) void {
+        const t = a.themes.themeAt(
+            a.arena,
+            a.io,
+            a.config_dir,
+            a.settings_cursor,
+        ) orelse return;
+        a.applyTheme(t, a.themes.nameAt(a.settings_cursor));
+    }
+
+    fn applyTheme(a: *App, t: Theme, name: []const u8) void {
+        a.theme = t;
+        // The marquee borrows its separator from the glyph set.
+        a.marquee.separator = t.glyphs.sep;
+        // The catalog frees its names on the next listing, and this one is
+        // kept until the config is written on exit, so take a copy in the
+        // arena. Falling back to the original on failure is safe for the
+        // frame being drawn and only risks a stale name in the config.
+        a.theme_name = a.arena.dupe(u8, name) catch name;
+    }
+
     fn cycleFocus(a: *App) void {
         const order = [_]Focus{ .main, .eq, .playlist };
         const current = for (order, 0..) |f, i| {
@@ -693,6 +819,13 @@ pub const App = struct {
     }
 
     fn handleMouse(a: *App, m: input.Mouse) void {
+        // Modal, so the windows underneath do not take clicks meant for the
+        // dialog — including the transport buttons.
+        if (a.settings_open) {
+            a.mouseSettings(m);
+            return;
+        }
+
         // The wheel is Winamp's volume control wherever the pointer sits,
         // except over the playlist, where it scrolls.
         if (m.button == .wheel_up or m.button == .wheel_down) {
@@ -739,6 +872,26 @@ pub const App = struct {
             return;
         }
         if (a.main_origin.contains(point)) a.pressMain(point);
+    }
+
+    fn mouseSettings(a: *App, m: input.Mouse) void {
+        if (m.button == .wheel_up) {
+            a.moveSettingsCursor(-1);
+            return;
+        }
+        if (m.button == .wheel_down) {
+            a.moveSettingsCursor(1);
+            return;
+        }
+        if (m.action != .press) return;
+
+        const r = settings_window.rect(a.screen.bounds());
+        const local = r.localize(.{ .x = m.x, .y = m.y }) orelse return;
+        switch (settings_window.hitTest(r, local, a.settings_scroll, a.themes.len())) {
+            .close => a.closeSettings(.keep),
+            .row => |index| a.setSettingsCursor(index),
+            else => {},
+        }
     }
 
     fn pressEq(a: *App, point: Point) void {
@@ -1015,9 +1168,25 @@ pub const App = struct {
             }, a.list);
         }
 
-        // Last, so it sits over every window: that is what an overlay is.
+        // Last, so these sit over every window: that is what an overlay is.
         if (a.help_page) |page| {
             help.draw(a.screen.painter(help.rect(a.screen.bounds())), a.theme, page);
+        }
+
+        if (a.settings_open) {
+            const r = settings_window.rect(a.screen.bounds());
+            a.settings_scroll = playlist_window.scrollToShow(
+                a.settings_scroll,
+                a.settings_cursor,
+                a.themes.len(),
+                settings_window.rowsFor(r.h),
+            );
+            settings_window.draw(a.screen.painter(r), .{
+                .theme = a.theme,
+                .catalog = &a.themes,
+                .cursor = a.settings_cursor,
+                .scroll = a.settings_scroll,
+            });
         }
     }
 
