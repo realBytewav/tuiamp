@@ -600,7 +600,14 @@ fn runLongPlaylist(gpa: std.mem.Allocator, keys: []const u8) !struct {
 }
 
 /// A library of three album folders, so folder mode has something to group.
-fn runFolderTree(gpa: std.mem.Allocator, keys: []const u8) !struct {
+/// `then`, when given, is handed the row the playlist's titlebar landed on
+/// and returns a second batch of input: mouse reports carry absolute cells,
+/// so they cannot be written down before the window has a position.
+fn runFolderTree(
+    gpa: std.mem.Allocator,
+    keys: []const u8,
+    then: ?*const fn (playlist_row: u16, buf: []u8) []const u8,
+) !struct {
     output: []u8,
     exit: ?u8,
 } {
@@ -642,10 +649,41 @@ fn runFolderTree(gpa: std.mem.Allocator, keys: []const u8) !struct {
         session.send(keys);
         try session.pump(&out, gpa, 900);
     }
+    if (then) |build| {
+        var term: Term = .init();
+        term.feed(out.items);
+        const row = term.rowContaining(" Playlist ") orelse return error.NoPlaylistDrawn;
+        var buf: [128]u8 = undefined;
+        session.send(build(row, &buf));
+        try session.pump(&out, gpa, 900);
+    }
     session.send("q");
     try session.pump(&out, gpa, 600);
 
     return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
+}
+
+/// Click the folder button, which is the third from the right of an 80-wide
+/// window centred in these 92 columns. SGR reports are 1-based.
+fn clickFolderButton(playlist_row: u16, buf: []u8) []const u8 {
+    const x = 6 + (80 - 8) + 1;
+    const y = playlist_row + 1;
+    return std.fmt.bufPrint(buf, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ x, y, x, y }) catch
+        unreachable;
+}
+
+test "the titlebar's folder button toggles the grouping" {
+    const gpa = testing.allocator;
+    const r = try runFolderTree(gpa, "", clickFolderButton);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+
+    // One click did what f does.
+    try testing.expect(term.contains("3 folders, 6 tracks"));
+    try testing.expect(term.contains("Talk Talk - Eden"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
 }
 
 test "f groups the playlist by folder, and folds it" {
@@ -653,7 +691,7 @@ test "f groups the playlist by folder, and folds it" {
 
     // Flat to begin with: every track is a row and no folder is named.
     {
-        const r = try runFolderTree(gpa, "");
+        const r = try runFolderTree(gpa, "", null);
         defer gpa.free(r.output);
         var term: Term = .init();
         term.feed(r.output);
@@ -665,7 +703,7 @@ test "f groups the playlist by folder, and folds it" {
     // `f` groups it. Entering the mode folds everything, which is the point
     // of it: three rows stand for six tracks.
     {
-        const r = try runFolderTree(gpa, "f");
+        const r = try runFolderTree(gpa, "f", null);
         defer gpa.free(r.output);
         var term: Term = .init();
         term.feed(r.output);
@@ -685,7 +723,7 @@ test "f groups the playlist by folder, and folds it" {
 
     // And `f` again puts the flat playlist back.
     {
-        const r = try runFolderTree(gpa, "ff");
+        const r = try runFolderTree(gpa, "ff", null);
         defer gpa.free(r.output);
         var term: Term = .init();
         term.feed(r.output);
@@ -701,7 +739,7 @@ test "a folded folder opens on the keyboard and shows its tracks" {
     // folders and holds three tracks. f groups and folds, tab focuses the
     // playlist, end goes to the last row, right opens what is under it.
     const key_right = "\x1b[C";
-    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right);
+    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right, null);
     defer gpa.free(r.output);
 
     var term: Term = .init();
@@ -721,7 +759,7 @@ test "left folds a folder back up" {
     // tracks go back to having no rows.
     const key_left = "\x1b[D";
     const key_right = "\x1b[C";
-    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right ++ key_left);
+    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right ++ key_left, null);
     defer gpa.free(r.output);
 
     var term: Term = .init();
@@ -957,4 +995,3 @@ test "a file it cannot play is reported, not silently ignored" {
     try testing.expectEqual(@as(?u8, 1), s.wait(3000));
     try testing.expect(std.mem.indexOf(u8, out.items, "nothing") != null);
 }
-

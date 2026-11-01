@@ -38,6 +38,8 @@ pub const Hit = union(enum) {
     titlebar,
     shade,
     close,
+    /// The titlebar's folder toggle: flat list, or grouped by folder.
+    folders,
     /// A visible row, as an index into the entry list.
     row: usize,
     /// Below the last entry: clicking there deselects rather than selecting
@@ -52,6 +54,7 @@ pub const Hit = union(enum) {
 pub const Layout = struct {
     frame: Rect,
     titlebar: Rect,
+    folders_btn: Rect,
     shade_btn: Rect,
     close_btn: Rect,
     /// The scrolling entry area.
@@ -65,6 +68,9 @@ pub const Layout = struct {
         return .{
             .frame = .{ .x = 0, .y = 0, .w = w, .h = h },
             .titlebar = .{ .x = 0, .y = 0, .w = w, .h = 1 },
+            // Spaced as the main window spaces its own three, so the row of
+            // buttons lines up across the stack.
+            .folders_btn = .{ .x = w -| 8, .y = 0, .w = 1, .h = 1 },
             .shade_btn = .{ .x = w -| 6, .y = 0, .w = 1, .h = 1 },
             .close_btn = .{ .x = w -| 4, .y = 0, .w = 1, .h = 1 },
             .rows = .{ .x = 1, .y = 1, .w = w -| 2, .h = body_h },
@@ -81,6 +87,7 @@ pub const Layout = struct {
     pub fn hitTest(l: Layout, p: Point, scroll: usize, count: usize) Hit {
         if (l.close_btn.contains(p)) return .close;
         if (l.shade_btn.contains(p)) return .shade;
+        if (l.folders_btn.contains(p)) return .folders;
         if (l.titlebar.contains(p)) return .titlebar;
         if (l.scrollbar.localize(p)) |q| {
             // A click on the plain border of a playlist that fits is not a
@@ -488,7 +495,14 @@ fn drawFrame(p: Painter, l: Layout, v: View) void {
     p.vline(w - 1, 1, h - 2, g.v, fs);
 
     _ = p.text(2, 0, " Playlist ", th.onBg(th.title_fg));
-    p.fillRect(.{ .x = l.shade_btn.x -| 1, .y = 0, .w = 6, .h = 1 }, ' ', th.onBg(th.button));
+    // One block behind all three buttons, so they read as a group rather
+    // than as three marks that happen to be near each other.
+    p.fillRect(.{ .x = l.folders_btn.x -| 1, .y = 0, .w = 8, .h = 1 }, ' ', th.onBg(th.button));
+    // Lit while the grouping is what is on screen, dim while it is not,
+    // which is how the equalizer's toggles say the same thing.
+    _ = p.text(l.folders_btn.x, 0, g.win_folders, th.onBg(
+        if (v.folders != null) th.button_active else th.button,
+    ));
     _ = p.text(l.shade_btn.x, 0, g.win_shade, th.onBg(th.button));
     _ = p.text(l.close_btn.x, 0, g.win_close, th.onBg(th.button));
 }
@@ -621,6 +635,13 @@ test "layout fits its frame and reserves the chrome rows" {
             try testing.expect(r.right() <= 80);
             try testing.expect(r.bottom() <= h);
         }
+        // The three titlebar buttons are distinct cells, in Winamp's order.
+        const buttons = [_]Rect{ l.folders_btn, l.shade_btn, l.close_btn };
+        for (buttons, 0..) |a, i| {
+            for (buttons[i + 1 ..]) |b| {
+                try testing.expect(a.right() <= b.x or b.right() <= a.x);
+            }
+        }
     }
 }
 
@@ -634,6 +655,10 @@ test "hitTest maps rows through the scroll offset" {
     // Past the end of a short list.
     try testing.expectEqual(Hit.empty, l.hitTest(.{ .x = 10, .y = 5 }, 0, 2));
     try testing.expectEqual(Hit.close, l.hitTest(.{ .x = l.close_btn.x, .y = 0 }, 0, 50));
+    try testing.expectEqual(Hit.shade, l.hitTest(.{ .x = l.shade_btn.x, .y = 0 }, 0, 50));
+    try testing.expectEqual(Hit.folders, l.hitTest(.{ .x = l.folders_btn.x, .y = 0 }, 0, 50));
+    // The rest of the titlebar is still the titlebar.
+    try testing.expectEqual(Hit.titlebar, l.hitTest(.{ .x = 4, .y = 0 }, 0, 50));
     try testing.expectEqual(Hit.status, l.hitTest(.{ .x = 4, .y = l.status.y }, 0, 50));
 }
 
@@ -1019,6 +1044,51 @@ test "folder mode draws the ascii theme without non-ASCII glyphs" {
     // The fold markers survive as the ascii convention.
     try testing.expect(std.mem.indexOf(u8, text, "- Bowie/Low") != null);
     try testing.expect(std.mem.indexOf(u8, text, "+ Eno") != null);
+}
+
+test "the folder button is lit in folder mode and dim out of it" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    const th: Theme = .classic;
+    var s = try screen.Screen.init(gpa, 60, 10);
+    defer s.deinit();
+    const l = Layout.compute(60, 10);
+    const marker = firstCodepoint(th.glyphs.win_folders);
+
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{ .theme = th }, &list);
+    const off = s.get(l.folders_btn.x, 0).?;
+    try testing.expectEqual(marker, off.cp);
+    try testing.expect(off.style.fg.eql(.{ .rgb = th.button }));
+
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{ .theme = th, .folders = &f }, &list);
+    const on = s.get(l.folders_btn.x, 0).?;
+    try testing.expectEqual(marker, on.cp);
+    try testing.expect(on.style.fg.eql(.{ .rgb = th.button_active }));
+
+    // And it sits beside the other two rather than on top of one.
+    try testing.expectEqual(
+        firstCodepoint(th.glyphs.win_shade),
+        s.get(l.shade_btn.x, 0).?.cp,
+    );
+    try testing.expectEqual(
+        firstCodepoint(th.glyphs.win_close),
+        s.get(l.close_btn.x, 0).?.cp,
+    );
+}
+
+/// The themes carry their titlebar marks as strings, since some are more
+/// than one byte; the screen holds codepoints.
+fn firstCodepoint(bytes: []const u8) u21 {
+    var it: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
+    return it.nextCodepoint() orelse ' ';
 }
 
 test "rowCount counts rows in whichever mode is on" {

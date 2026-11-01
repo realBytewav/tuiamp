@@ -54,9 +54,12 @@ pub const Glyphs = struct {
     scope_lo: u21,
     /// LCD colon, drawn between the minute and second digits.
     colon: u21,
-    /// Titlebar buttons: windowshade and close.
+    /// Titlebar buttons: windowshade, close, and the playlist's folder
+    /// toggle. The folder one is lit or dim rather than swapped for another
+    /// glyph, the same way the equalizer's own toggles read.
     win_shade: []const u8,
     win_close: []const u8,
+    win_folders: []const u8,
     /// Separates the title from its repeat when the marquee wraps.
     sep: []const u8,
     /// Single-glyph marker for the playing entry in the playlist. Separate
@@ -92,6 +95,7 @@ pub const Glyphs = struct {
         .colon = '▪',
         .win_shade = "▁",
         .win_close = "✕",
+        .win_folders = "▤",
         .sep = " ••• ",
         .now_playing = "▶",
         .prev = "|◀◀",
@@ -349,6 +353,8 @@ pub const File = struct {
         colon: []const u8,
         win_shade: []const u8,
         win_close: []const u8,
+        /// Leave it out to inherit the grouped-lines square.
+        win_folders: []const u8 = "▤",
         sep: []const u8,
         now_playing: []const u8,
         prev: []const u8,
@@ -412,6 +418,7 @@ pub fn fromFile(f: File) Theme {
         .colon = firstCodepoint(gf.colon, d.colon),
         .win_shade = gf.win_shade,
         .win_close = gf.win_close,
+        .win_folders = gf.win_folders,
         .sep = gf.sep,
         .now_playing = gf.now_playing,
         .prev = gf.prev,

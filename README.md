@@ -75,8 +75,8 @@ With the equalizer focused, `up`/`down` move the selected band by 1.5 dB and
 resets the lot.
 
 Mouse: drag the seek, volume, balance and playlist-scroll sliders; click the
-transport buttons; double-click a playlist row; the wheel sets volume, or
-scrolls the playlist.
+transport buttons and the titlebar buttons, the playlist's `▤` among them;
+double-click a playlist row; the wheel sets volume, or scrolls the playlist.
 
 The equalizer bands are the exception, because a row of cells is a clumsy
 unit to set a gain in: dragging a band and scrolling it move it by the same
@@ -97,8 +97,9 @@ anywhere — takes hold of the value as it stands.
   reordering, shuffle as a permutation over a fixed view, repeat off/all/one.
   The scrollbar lives in the window's right-hand border, where Winamp put
   its own, so it costs no title width.
-- **Folder mode**: `f` groups the playlist by the folder each track came
-  from, with per-folder track counts and running times, and folds them away
+- **Folder mode**: `f` — or the `▤` button in the playlist titlebar, which
+  is lit while the mode is on — groups the playlist by the folder each track
+  came from, with per-folder track counts and running times, and folds them away
   — a 1,457-track library reads as a hundred-odd albums. `left`/`right` and
   `enter` fold and unfold, `del` on a header removes the whole folder, and
   entering the mode folds the lot, leaving the cursor on the header of
@@ -162,7 +163,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 281 unit + 15 end-to-end tests
+zig build test            # 282 unit + 16 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries

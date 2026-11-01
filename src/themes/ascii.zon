@@ -57,6 +57,7 @@
         .colon = ":",
         .win_shade = "_",
         .win_close = "x",
+        .win_folders = "F",
         .sep = " *** ",
         .now_playing = ">",
         .prev = "|<<",

@@ -1259,6 +1259,7 @@ pub const App = struct {
         switch (l.hitTest(local, a.playlist_scroll, a.playlistRowCount())) {
             .close => a.togglePlaylist(),
             .shade => a.togglePlaylist(),
+            .folders => a.toggleFolders(),
             .scrollbar => |target| {
                 a.drag = .playlist_scroll;
                 a.playlist_scroll = target;
