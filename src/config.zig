@@ -30,6 +30,8 @@ pub const Config = struct {
     shaded: bool = false,
     eq_open: bool = false,
     playlist_open: bool = true,
+    /// Whether the playlist groups its entries by folder.
+    playlist_folders: bool = false,
 
     shuffle: bool = false,
     /// "off", "all" or "one".
@@ -181,6 +183,7 @@ test "serialize then parse is lossless" {
         .shaded = true,
         .eq_open = true,
         .playlist_open = false,
+        .playlist_folders = true,
         .shuffle = true,
         .repeat = "one",
         .vis_mode = "oscilloscope",
@@ -208,6 +211,7 @@ test "serialize then parse is lossless" {
     try testing.expectEqual(original.show_remaining, back.show_remaining);
     try testing.expectEqual(original.shaded, back.shaded);
     try testing.expectEqual(original.playlist_open, back.playlist_open);
+    try testing.expectEqual(original.playlist_folders, back.playlist_folders);
     try testing.expectEqual(original.shuffle, back.shuffle);
     try testing.expectEqualStrings(original.repeat, back.repeat);
     try testing.expectEqualStrings(original.vis_mode, back.vis_mode);

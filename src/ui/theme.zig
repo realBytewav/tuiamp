@@ -44,6 +44,9 @@ pub const Glyphs = struct {
     thumb: u21,
     /// Visualizer peak cap.
     peak: u21,
+    /// Folder markers in the playlist's folder mode: expanded, collapsed.
+    fold_open: u21,
+    fold_closed: u21,
     /// Oscilloscope trace: a full cell, and the upper and lower halves, so
     /// the scope gets twice the vertical resolution of the box it lives in.
     scope: u21,
@@ -81,6 +84,8 @@ pub const Glyphs = struct {
         .track = '─',
         .thumb = '█',
         .peak = '▁',
+        .fold_open = '▼',
+        .fold_closed = '▶',
         .scope = '█',
         .scope_hi = '▀',
         .scope_lo = '▄',
@@ -335,6 +340,9 @@ pub const File = struct {
         track: []const u8,
         thumb: []const u8,
         peak: []const u8,
+        /// Leave these out to inherit the triangles.
+        fold_open: []const u8 = "▼",
+        fold_closed: []const u8 = "▶",
         scope: []const u8,
         scope_hi: []const u8,
         scope_lo: []const u8,
@@ -396,6 +404,8 @@ pub fn fromFile(f: File) Theme {
         .track = firstCodepoint(gf.track, d.track),
         .thumb = firstCodepoint(gf.thumb, d.thumb),
         .peak = firstCodepoint(gf.peak, d.peak),
+        .fold_open = firstCodepoint(gf.fold_open, d.fold_open),
+        .fold_closed = firstCodepoint(gf.fold_closed, d.fold_closed),
         .scope = firstCodepoint(gf.scope, d.scope),
         .scope_hi = firstCodepoint(gf.scope_hi, d.scope_hi),
         .scope_lo = firstCodepoint(gf.scope_lo, d.scope_lo),

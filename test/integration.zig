@@ -599,6 +599,141 @@ fn runLongPlaylist(gpa: std.mem.Allocator, keys: []const u8) !struct {
     return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
 }
 
+/// A library of three album folders, so folder mode has something to group.
+fn runFolderTree(gpa: std.mem.Allocator, keys: []const u8) !struct {
+    output: []u8,
+    exit: ?u8,
+} {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const albums = [_][]const u8{ "Bowie - Low", "Eno - Green World", "Talk Talk - Eden" };
+    var path_buf: [64]u8 = undefined;
+    for (albums, 1..) |album, n| {
+        try tmp.dir.createDirPath(io, album);
+        // A different number of tracks each, so the counts on the headers
+        // cannot all be right by accident.
+        for (1..n + 1) |i| {
+            const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d:0>2} Track.wav", .{ album, i });
+            try writeToneSeconds(tmp.dir, sub, 1);
+        }
+    }
+
+    const root_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root_path);
+    const root = try gpa.dupeZ(u8, root_path);
+    defer gpa.free(root);
+
+    var session = try Session.start(&.{
+        exe_path,
+        "--null-audio",
+        "--no-config",
+        "--volume",
+        "50",
+        root.ptr,
+    });
+    defer session.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try session.pump(&out, gpa, 1500);
+    if (keys.len > 0) {
+        session.send(keys);
+        try session.pump(&out, gpa, 900);
+    }
+    session.send("q");
+    try session.pump(&out, gpa, 600);
+
+    return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
+}
+
+test "f groups the playlist by folder, and folds it" {
+    const gpa = testing.allocator;
+
+    // Flat to begin with: every track is a row and no folder is named.
+    {
+        const r = try runFolderTree(gpa, "");
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+        try testing.expect(term.contains("6 tracks"));
+        try testing.expect(!term.contains("Bowie - Low"));
+        try testing.expectEqual(@as(?u8, 0), r.exit);
+    }
+
+    // `f` groups it. Entering the mode folds everything, which is the point
+    // of it: three rows stand for six tracks.
+    {
+        const r = try runFolderTree(gpa, "f");
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+
+        try testing.expect(term.contains("3 folders, 6 tracks"));
+        try testing.expect(term.contains("Bowie - Low"));
+        try testing.expect(term.contains("Talk Talk - Eden"));
+        // Everything is folded, so no track has a row at all. Scoped to the
+        // playlist window, because the main window is displaying the title
+        // of the playing track and that says "Track" too.
+        const pl = term.rowContaining(" Playlist ").?;
+        try testing.expect(!term.containsBetween(pl, pl + 14, "Track.wav"));
+        try testing.expect(!term.containsBetween(pl, pl + 14, "01 Track"));
+        try testing.expect(!term.containsBetween(pl, pl + 14, "03 Track"));
+        try testing.expectEqual(@as(?u8, 0), r.exit);
+    }
+
+    // And `f` again puts the flat playlist back.
+    {
+        const r = try runFolderTree(gpa, "ff");
+        defer gpa.free(r.output);
+        var term: Term = .init();
+        term.feed(r.output);
+        try testing.expect(term.contains("6 tracks"));
+        try testing.expect(!term.contains("3 folders"));
+        try testing.expectEqual(@as(?u8, 0), r.exit);
+    }
+}
+
+test "a folded folder opens on the keyboard and shows its tracks" {
+    const gpa = testing.allocator;
+    // The scan sorts by path, so "Talk Talk - Eden" is the last of the three
+    // folders and holds three tracks. f groups and folds, tab focuses the
+    // playlist, end goes to the last row, right opens what is under it.
+    const key_right = "\x1b[C";
+    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+    const pl = term.rowContaining(" Playlist ").?;
+
+    try testing.expect(term.containsBetween(pl, pl + 14, "Talk Talk - Eden"));
+    // Its tracks are numbered within the folder, so the third one is 3 even
+    // though it is the sixth entry in the playlist.
+    try testing.expect(term.containsBetween(pl, pl + 14, "3. 03 Track"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
+test "left folds a folder back up" {
+    const gpa = testing.allocator;
+    // Open the last folder, then fold it again: the header survives and its
+    // tracks go back to having no rows.
+    const key_left = "\x1b[D";
+    const key_right = "\x1b[C";
+    const r = try runFolderTree(gpa, "f\t" ++ key_end ++ key_right ++ key_left);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+    const pl = term.rowContaining(" Playlist ").?;
+
+    try testing.expect(term.containsBetween(pl, pl + 14, "Talk Talk - Eden"));
+    try testing.expect(!term.containsBetween(pl, pl + 14, "03 Track"));
+    try testing.expect(term.contains("3 folders, 6 tracks"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
 /// Eight notches of the wheel over the playlist, in SGR mouse reporting.
 const wheel_down_8 = "\x1b[<65;20;22M" ** 8;
 /// Enough to run it past the end, so the view lands on the last page.
@@ -822,3 +957,4 @@ test "a file it cannot play is reported, not silently ignored" {
     try testing.expectEqual(@as(?u8, 1), s.wait(3000));
     try testing.expect(std.mem.indexOf(u8, out.items, "nothing") != null);
 }
+

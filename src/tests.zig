@@ -20,6 +20,7 @@ comptime {
     _ = @import("playlist/scan.zig");
     _ = @import("playlist/pls.zig");
     _ = @import("playlist/m3u.zig");
+    _ = @import("playlist/folders.zig");
     _ = @import("playlist/list.zig");
     _ = @import("ui/app.zig");
     _ = @import("ui/main_window.zig");

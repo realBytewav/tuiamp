@@ -46,6 +46,8 @@
         .tr = "+",
         .bl = "+",
         .br = "+",
+        .fold_open = "-",
+        .fold_closed = "+",
         .track = "-",
         .thumb = "#",
         .peak = "_",

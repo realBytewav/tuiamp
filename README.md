@@ -67,7 +67,7 @@ space       play / pause                           alt+e  playlist
 left/right  seek 5s        up/down  volume         alt+g  equalizer
 s shuffle   r repeat       j jump to playing       w      windowshade
 t elapsed / remaining      g cycle analyzer        q      quit
-? keys, then what it does  ctrl+p settings
+f flat / folders           ctrl+p settings         ?      keys, then more
 ```
 
 With the equalizer focused, `up`/`down` move the selected band by 1.5 dB and
@@ -97,6 +97,19 @@ anywhere — takes hold of the value as it stands.
   reordering, shuffle as a permutation over a fixed view, repeat off/all/one.
   The scrollbar lives in the window's right-hand border, where Winamp put
   its own, so it costs no title width.
+- **Folder mode**: `f` groups the playlist by the folder each track came
+  from, with per-folder track counts and running times, and folds them away
+  — a 1,457-track library reads as a hundred-odd albums. `left`/`right` and
+  `enter` fold and unfold, `del` on a header removes the whole folder, and
+  entering the mode folds the lot, leaving the cursor on the header of
+  wherever you were so `right` gets you back inside.
+
+  A group is a *run* of consecutive entries sharing a directory, not a set,
+  so folder mode never reorders anything: what you see flat is what you see
+  grouped, and a folder the playlist visits twice appears twice. The price
+  of that is the one real cost of the feature — a row is no longer an entry,
+  so the cursor, the scroll, the scrollbar and the hit-testing all work in
+  row space while the playlist model stays in entry space.
 - **Visualizer**: a passthrough node taps the audio into a lock-free ring; the
   UI runs a windowed FFT over it and draws a log-spaced spectrum with falling
   peak caps, or an oscilloscope at half-block resolution.
@@ -149,7 +162,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 262 unit + 11 end-to-end tests
+zig build test            # 281 unit + 15 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries
@@ -171,7 +184,9 @@ window appears, that keys reach it, that it keeps redrawing while playing,
 that a scrolled playlist stays where it was put, that `ctrl+p` really
 repaints the player in another theme rather than just listing one, that
 `shift+up` on an equalizer band lands on a gain none of the slider's nine
-rows can express, and that it hands the terminal back.
+rows can express, that `f` turns six tracks in three directories into three
+folded rows and the arrows open one again, and that it hands the terminal
+back.
 They replay the output into a cell grid first, because the renderer emits
 only the cells that changed: a playlist row reading `30. Scroll 30` after a
 scroll is assembled from whatever differed from the frame before and need
@@ -189,7 +204,7 @@ src/
   config.zig       settings, as ZON
   audio/           engine, player, eq, the visualizer tap, fft
   meta/            id3, mpeg frame headers, flac, wav, text decoding
-  playlist/        the list model, m3u, pls, directory scanning
+  playlist/        the list model, m3u, pls, scanning, folder grouping
   term/            raw mode, input decoding, the cell grid
   ui/              the windows and widgets
   themes/          the built-in themes, also installed for copying

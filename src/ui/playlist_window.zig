@@ -25,6 +25,8 @@ const fmt = @import("fmt.zig");
 const marquee_mod = @import("widgets/marquee.zig");
 const list_mod = @import("../playlist/list.zig");
 const List = list_mod.List;
+const folders_mod = @import("../playlist/folders.zig");
+const Folders = folders_mod.Folders;
 
 /// Chrome: top border, bottom border, and the status row above it.
 pub const chrome_rows: u16 = 3;
@@ -98,8 +100,15 @@ pub const Layout = struct {
 pub const View = struct {
     theme: Theme,
     focused: bool = false,
-    /// First visible entry.
+    /// First visible row.
     scroll: usize = 0,
+    /// The highlighted row. In flat mode a row is an entry and this is the
+    /// list's own cursor; in folder mode it may be a folder header, which no
+    /// entry index can name, so the window is told rather than deducing it.
+    cursor_row: usize = 0,
+    /// Set to group the entries by folder. The grouping is a view over the
+    /// same list, rebuilt by the caller; the window only reads it.
+    folders: ?*const Folders = null,
 };
 
 /// Hold `scroll` inside the range that leaves no blank rows below the last
@@ -170,12 +179,28 @@ fn ratio(span: usize, numerator: usize, denominator: usize) f32 {
 
 pub fn draw(p: Painter, l: Layout, v: View, list: *const List) void {
     const th = v.theme;
-    const g = th.glyphs;
 
     p.fill(.{ .bg = .{ .rgb = th.bg } });
     drawFrame(p, l, v);
 
     const rows = p.sub(l.rows);
+    if (v.folders) |f| {
+        drawGrouped(rows, l, v, list, f);
+    } else {
+        drawFlat(rows, l, v, list);
+    }
+
+    drawScrollbar(p, l, v, rowCount(v, list));
+    drawStatus(p, l, v, list);
+}
+
+/// Rows on offer, which is entries in flat mode and visible rows in folder
+/// mode. The scrollbar and the hit-testing both count in these.
+pub fn rowCount(v: View, list: *const List) usize {
+    return if (v.folders) |f| f.len() else list.len();
+}
+
+fn drawFlat(rows: Painter, l: Layout, v: View, list: *const List) void {
     const count = list.len();
     const current = list.currentIndex();
 
@@ -188,58 +213,173 @@ pub fn draw(p: Painter, l: Layout, v: View, list: *const List) void {
     while (row < l.rows.h) : (row += 1) {
         const index = v.scroll + row;
         if (index >= count) break;
-        const entry = list.entries.items[index];
+        drawEntryRow(rows, l, v, .{
+            .row = row,
+            .entry = list.entries.items[index],
+            .number = index + 1,
+            .num_w = num_w,
+            .selected = index == v.cursor_row,
+            .playing = current != null and index == current.?,
+        });
+    }
+}
 
-        const is_cursor = index == list.cursor;
-        const is_current = current != null and index == current.?;
+fn drawGrouped(rows: Painter, l: Layout, v: View, list: *const List, f: *const Folders) void {
+    const current = list.currentIndex();
 
-        const style: Style = if (is_cursor and v.focused)
-            .{ .fg = .{ .rgb = th.list_sel_fg }, .bg = .{ .rgb = th.list_sel_bg } }
-        else if (is_current)
-            th.onBg(th.list_current)
-        else if (is_cursor)
-            th.onBg(th.text_bright)
-        else
-            th.onBg(th.text);
+    // Numbers run within their folder, so the column is as wide as the
+    // biggest folder rather than as the whole playlist.
+    var biggest: usize = 1;
+    for (f.groups.items) |g| biggest = @max(biggest, g.count);
+    const num_w: u16 = @intCast(fold_indent + digits(biggest) + 2);
 
-        // Selected rows are filled edge to edge so the highlight reads as a
-        // bar rather than as coloured text.
-        rows.fillRect(.{ .x = 0, .y = row, .w = l.rows.w, .h = 1 }, ' ', style);
-
-        // Right-aligned, so the dots line up down the column whatever the
-        // playlist's length.
-        var nbuf: [24]u8 = undefined;
-        const num = std.fmt.bufPrint(&nbuf, "{d}.", .{index + 1}) catch "";
-        const num_x = if (num_w > num.len + 1) num_w - @as(u16, @intCast(num.len)) - 1 else 1;
-        _ = rows.text(num_x, row, num, style);
-
-        var dbuf: [16]u8 = undefined;
-        const dur = fmt.duration(&dbuf, entry.duration);
-        const dur_w: u16 = @intCast(dur.len);
-
-        // Title gets whatever is left between the number and the duration.
-        const title_x = num_w;
-        const reserved = title_x + dur_w + 2;
-        if (l.rows.w > reserved) {
-            const avail = l.rows.w - reserved;
-            const title_cols = marquee_mod.displayWidth(entry.title);
-            if (title_cols <= avail) {
-                _ = rows.text(title_x, row, entry.title, style);
-            } else {
-                drawEllipsized(rows, title_x, row, avail, entry.title, style);
-            }
-        }
-        _ = rows.text(l.rows.w - dur_w - 1, row, dur, style);
-
-        if (is_current) {
-            // A marker in the gutter, so the playing track is identifiable
-            // even when the cursor highlight is sitting on top of it.
-            _ = rows.text(0, row, g.now_playing, style);
+    var row: u16 = 0;
+    while (row < l.rows.h) : (row += 1) {
+        const index = v.scroll + row;
+        switch (f.rowAt(index) orelse break) {
+            .folder => |gi| drawFolderRow(rows, l, v, f.groups.items[gi], .{
+                .row = row,
+                .selected = index == v.cursor_row,
+                // A folded folder has to say that the playing track is in
+                // there somewhere, or `j` looks like it did nothing.
+                .playing = current != null and f.groups.items[gi].contains(current.?),
+            }),
+            .track => |entry| drawEntryRow(rows, l, v, .{
+                .row = row,
+                .entry = list.entries.items[entry],
+                .number = entry - groupFirst(f, entry) + 1,
+                .num_w = num_w,
+                .selected = index == v.cursor_row,
+                .playing = current != null and entry == current.?,
+                .indent = fold_indent,
+            }),
         }
     }
+}
 
-    drawScrollbar(p, l, v, count);
-    drawStatus(p, l, v, list);
+/// Indent on a track under its folder header.
+const fold_indent: u16 = 2;
+
+fn groupFirst(f: *const Folders, entry: usize) usize {
+    const gi = f.groupOf(entry) orelse return 0;
+    return f.groups.items[gi].first;
+}
+
+/// How a row is marked out: the cursor sits on it, it is playing, or neither.
+fn rowStyle(th: Theme, v: View, selected: bool, playing: bool) Style {
+    if (selected and v.focused) {
+        return .{ .fg = .{ .rgb = th.list_sel_fg }, .bg = .{ .rgb = th.list_sel_bg } };
+    }
+    if (playing) return th.onBg(th.list_current);
+    if (selected) return th.onBg(th.text_bright);
+    return th.onBg(th.text);
+}
+
+const EntryRow = struct {
+    row: u16,
+    entry: list_mod.Entry,
+    /// What to print in the index column, one-based.
+    number: usize,
+    num_w: u16,
+    selected: bool,
+    playing: bool,
+    indent: u16 = 0,
+};
+
+fn drawEntryRow(rows: Painter, l: Layout, v: View, r: EntryRow) void {
+    const th = v.theme;
+    const g = th.glyphs;
+    const style = rowStyle(th, v, r.selected, r.playing);
+
+    // Selected rows are filled edge to edge so the highlight reads as a
+    // bar rather than as coloured text.
+    rows.fillRect(.{ .x = 0, .y = r.row, .w = l.rows.w, .h = 1 }, ' ', style);
+
+    // Right-aligned, so the dots line up down the column whatever the
+    // playlist's length.
+    var nbuf: [24]u8 = undefined;
+    const num = std.fmt.bufPrint(&nbuf, "{d}.", .{r.number}) catch "";
+    const num_x = if (r.num_w > num.len + 1) r.num_w - @as(u16, @intCast(num.len)) - 1 else 1;
+    _ = rows.text(num_x, r.row, num, style);
+
+    var dbuf: [16]u8 = undefined;
+    const dur = fmt.duration(&dbuf, r.entry.duration);
+    const dur_w: u16 = @intCast(dur.len);
+
+    // Title gets whatever is left between the number and the duration.
+    const title_x = r.num_w;
+    const reserved = title_x + dur_w + 2;
+    if (l.rows.w > reserved) {
+        const avail = l.rows.w - reserved;
+        const title_cols = marquee_mod.displayWidth(r.entry.title);
+        if (title_cols <= avail) {
+            _ = rows.text(title_x, r.row, r.entry.title, style);
+        } else {
+            drawEllipsized(rows, title_x, r.row, avail, r.entry.title, style);
+        }
+    }
+    _ = rows.text(l.rows.w - dur_w - 1, r.row, dur, style);
+
+    if (r.playing) {
+        // A marker in the gutter, so the playing track is identifiable
+        // even when the cursor highlight is sitting on top of it. Column
+        // zero in both modes: the folder indent shifts the number, and
+        // putting the marker in there instead would land it on the digits.
+        _ = rows.text(0, r.row, g.now_playing, style);
+    }
+}
+
+const FolderRow = struct {
+    row: u16,
+    selected: bool,
+    playing: bool,
+};
+
+fn drawFolderRow(rows: Painter, l: Layout, v: View, group: folders_mod.Group, r: FolderRow) void {
+    const th = v.theme;
+    const g = th.glyphs;
+    const style = rowStyle(th, v, r.selected, r.playing);
+    const bright: Style = if (r.selected and v.focused) style else th.onBg(th.text_bright);
+
+    rows.fillRect(.{ .x = 0, .y = r.row, .w = l.rows.w, .h = 1 }, ' ', style);
+
+    var marker: [4]u8 = undefined;
+    const cp: u21 = if (group.collapsed) g.fold_closed else g.fold_open;
+    const n = std.unicode.utf8Encode(cp, &marker) catch 0;
+    _ = rows.text(0, r.row, marker[0..n], bright);
+    // A folded folder holding the playing track says so by colour alone:
+    // the one free column is the gap before the label, and a second
+    // triangle next to the fold marker would read as part of it.
+
+    // The track count and the folder's running time, right-aligned, with the
+    // playlist's own "+" for a sum that is still missing a length.
+    var tail_buf: [40]u8 = undefined;
+    var dbuf: [20]u8 = undefined;
+    // Knowing none of the lengths is a dash, as it is on a track; knowing
+    // some of them is a lower bound.
+    var total = fmt.duration(
+        dbuf[0 .. dbuf.len - 1],
+        if (group.partial and group.duration == 0) -1 else group.duration,
+    );
+    if (group.partial and group.duration > 0) {
+        dbuf[total.len] = '+';
+        total = dbuf[0 .. total.len + 1];
+    }
+    const tail = std.fmt.bufPrint(&tail_buf, "{d}  {s}", .{ group.count, total }) catch "";
+    const tail_w: u16 = @intCast(tail.len);
+
+    const label_x: u16 = 2;
+    const reserved = label_x + tail_w + 2;
+    if (l.rows.w > reserved) {
+        const avail = l.rows.w - reserved;
+        const label = group.label();
+        if (marquee_mod.displayWidth(label) <= avail) {
+            _ = rows.text(label_x, r.row, label, bright);
+        } else {
+            drawEllipsized(rows, label_x, r.row, avail, label, bright);
+        }
+        _ = rows.text(l.rows.w - tail_w - 1, r.row, tail, style);
+    }
 }
 
 /// A thumb in the right-hand border, drawn only when the playlist overflows:
@@ -290,7 +430,12 @@ fn drawStatus(p: Painter, l: Layout, v: View, list: *const List) void {
 
     var buf: [64]u8 = undefined;
     const count = list.len();
-    const left = std.fmt.bufPrint(&buf, "{d} track{s}", .{
+    const left = if (v.folders) |f| std.fmt.bufPrint(&buf, "{d} folder{s}, {d} track{s}", .{
+        f.groups.items.len,
+        if (f.groups.items.len == 1) "" else "s",
+        count,
+        if (count == 1) "" else "s",
+    }) catch "" else std.fmt.bufPrint(&buf, "{d} track{s}", .{
         count,
         if (count == 1) "" else "s",
     }) catch "";
@@ -729,6 +874,173 @@ test "a long playlist draws a thumb in its border, a short one does not" {
     while (y <= l.scrollbar.h) : (y += 1) {
         try testing.expectEqual(Theme.classic.glyphs.v, s.get(bar_x, y).?.cp);
     }
+}
+
+fn groupedList(gpa: std.mem.Allocator) !List {
+    var list = List.init(gpa, 1);
+    errdefer list.deinit();
+    try list.append("/mnt/1T/Music/Bowie/Low/01.mp3", "Speed of Life", 166);
+    try list.append("/mnt/1T/Music/Bowie/Low/02.mp3", "Breaking Glass", 112);
+    try list.append("/mnt/1T/Music/Eno/Another Green World/01.mp3", "Sky Saw", 189);
+    try list.append("/mnt/1T/Music/Talk Talk/Spirit of Eden/01.mp3", "The Rainbow", -1);
+    return list;
+}
+
+test "folder mode draws headers, indented tracks and per-folder totals" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+
+    var s = try screen.Screen.init(gpa, 60, 12);
+    defer s.deinit();
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), Layout.compute(60, 12), .{
+        .theme = .classic,
+        .focused = true,
+        .folders = &f,
+    }, &list);
+
+    const text = try renderText(&s, gpa);
+    defer gpa.free(text);
+
+    // Labels drop the prefix every folder shares, so the row says what the
+    // folder is rather than where the library lives.
+    try testing.expect(std.mem.indexOf(u8, text, "Bowie/Low") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Another Green World") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "/mnt/1T") == null);
+    // Tracks are numbered within their folder, not across the playlist: the
+    // single track of the third folder is its 1, not the playlist's 4.
+    try testing.expect(std.mem.indexOf(u8, text, "1. The Rainbow") != null);
+    // Bowie/Low: two tracks, 4:38 between them.
+    try testing.expect(std.mem.indexOf(u8, text, "4:38") != null);
+    // A folder with no known length shows a dash rather than 0:00.
+    try testing.expect(std.mem.indexOf(u8, text, "-:--") != null);
+    // And the status row counts both things.
+    try testing.expect(std.mem.indexOf(u8, text, "3 folders, 4 tracks") != null);
+}
+
+test "a folded folder hides its tracks and says it is shut" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+    try f.setCollapsed(&list, 0, true);
+
+    var s = try screen.Screen.init(gpa, 60, 12);
+    defer s.deinit();
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), Layout.compute(60, 12), .{
+        .theme = .classic,
+        .folders = &f,
+    }, &list);
+
+    const text = try renderText(&s, gpa);
+    defer gpa.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Bowie/Low") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Speed of Life") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Breaking Glass") == null);
+    // Its neighbours are untouched.
+    try testing.expect(std.mem.indexOf(u8, text, "Sky Saw") != null);
+    // The marker says which way it is: closed on the folded one, open on the
+    // rest.
+    try testing.expect(std.mem.indexOf(u8, text, "\u{25b6} Bowie/Low") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\u{25bc} Eno") != null);
+    // The tracks are still in the playlist; only their rows went away.
+    try testing.expect(std.mem.indexOf(u8, text, "3 folders, 4 tracks") != null);
+}
+
+test "the highlight follows cursor_row, in both modes" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    const th: Theme = .classic;
+    var s = try screen.Screen.init(gpa, 60, 12);
+    defer s.deinit();
+    const l = Layout.compute(60, 12);
+    const selected: screen.Color = .{ .rgb = th.list_sel_bg };
+
+    // Flat: the row the caller names is the entry it names.
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{
+        .theme = th,
+        .focused = true,
+        .cursor_row = 2,
+    }, &list);
+    try testing.expect(s.get(2, 1 + 2).?.style.bg.eql(selected));
+    try testing.expect(!s.get(2, 1 + 1).?.style.bg.eql(selected));
+
+    // Grouped: row 0 is a header, which no entry index could have selected.
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), l, .{
+        .theme = th,
+        .focused = true,
+        .cursor_row = 0,
+        .folders = &f,
+    }, &list);
+    try testing.expect(s.get(2, 1).?.style.bg.eql(selected));
+    try testing.expect(!s.get(2, 2).?.style.bg.eql(selected));
+}
+
+test "folder mode draws the ascii theme without non-ASCII glyphs" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+    try f.setCollapsed(&list, 1, true);
+
+    var s = try screen.Screen.init(gpa, 60, 12);
+    defer s.deinit();
+    s.clear(.plain);
+    draw(s.painter(s.bounds()), Layout.compute(60, 12), .{
+        .theme = .ascii,
+        .focused = true,
+        .folders = &f,
+    }, &list);
+
+    const text = try renderText(&s, gpa);
+    defer gpa.free(text);
+    for (text) |b| try testing.expect(b < 0x80);
+    // The fold markers survive as the ascii convention.
+    try testing.expect(std.mem.indexOf(u8, text, "- Bowie/Low") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "+ Eno") != null);
+}
+
+test "rowCount counts rows in whichever mode is on" {
+    const gpa = testing.allocator;
+    var list = try groupedList(gpa);
+    defer list.deinit();
+
+    var f = folders_mod.Folders.init(gpa);
+    defer f.deinit();
+    try f.rebuild(&list);
+
+    try testing.expectEqual(@as(usize, 4), rowCount(.{ .theme = .classic }, &list));
+    // Three headers and four tracks.
+    try testing.expectEqual(
+        @as(usize, 7),
+        rowCount(.{ .theme = .classic, .folders = &f }, &list),
+    );
+    try f.setAll(&list, true);
+    try testing.expectEqual(
+        @as(usize, 3),
+        rowCount(.{ .theme = .classic, .folders = &f }, &list),
+    );
 }
 
 test "a window too small to hold a row does not panic" {

@@ -25,6 +25,7 @@ const theme_mod = @import("theme.zig");
 const Theme = theme_mod.Theme;
 const main_window = @import("main_window.zig");
 const playlist_window = @import("playlist_window.zig");
+const folders_mod = @import("../playlist/folders.zig");
 const eq_window = @import("eq_window.zig");
 const settings_window = @import("settings_window.zig");
 const help = @import("help.zig");
@@ -133,6 +134,16 @@ pub const App = struct {
     eq_cursor: usize = 0,
     playlist_open: bool = false,
     playlist_scroll: usize = 0,
+    /// The playlist grouped by folder, and whether that grouping is what is
+    /// on screen. In folder mode the window's rows are these rows rather
+    /// than entries, so `folder_cursor` is what the user is pointing at and
+    /// `list.cursor` trails it, holding the entry underneath.
+    folders: folders_mod.Folders = undefined,
+    show_folders: bool = false,
+    folder_cursor: usize = 0,
+    /// The grouping is derived state, rebuilt lazily: the playlist only
+    /// changes on a reorder, a delete, or the initial scan.
+    folders_stale: bool = true,
     /// Set when the cursor moves, and cleared once the view has caught up.
     /// Without it the playlist view is recentred on the cursor every frame,
     /// which yanks the wheel and the scrollbar straight back where they
@@ -204,6 +215,7 @@ pub const App = struct {
             .config_dir = themes.config_dir,
             .theme_name = themes.name,
             .themes = .init(gpa),
+            .folders = .init(gpa),
             .winch_fd = winch_fd,
             .marquee = m,
             .playlist_open = list.len() > 1,
@@ -221,6 +233,7 @@ pub const App = struct {
         a.show_remaining = cfg.show_remaining;
         a.shaded = cfg.shaded;
         a.eq_open = cfg.eq_open;
+        a.show_folders = cfg.playlist_folders;
         // An empty playlist has nothing to show, whatever the config says.
         a.playlist_open = cfg.playlist_open and a.list.len() > 0;
 
@@ -256,6 +269,7 @@ pub const App = struct {
             .shaded = a.shaded,
             .eq_open = a.eq_open,
             .playlist_open = a.playlist_open,
+            .playlist_folders = a.show_folders,
             .shuffle = a.list.shuffle,
             .repeat = switch (a.list.repeat) {
                 .off => "off",
@@ -279,6 +293,7 @@ pub const App = struct {
     pub fn deinit(a: *App) void {
         _ = linux.close(a.winch_fd);
         a.themes.deinit();
+        a.folders.deinit();
         a.gpa.destroy(a.vis_window);
         a.gpa.destroy(a.analyzer);
         a.screen.deinit();
@@ -525,6 +540,8 @@ pub const App = struct {
                 'g' => a.analyzer.mode = a.analyzer.mode.next(),
                 // Jump the playlist view to what is playing.
                 'j' => a.revealCurrent(),
+                // Flat playlist, or grouped by folder.
+                'f' => a.toggleFolders(),
                 else => {},
             },
             .tab => a.cycleFocus(),
@@ -548,9 +565,209 @@ pub const App = struct {
         }
     }
 
+    // --- folder mode ------------------------------------------------------
+
+    /// Rows the playlist window is showing: entries, or grouped rows.
+    fn playlistRowCount(a: *App) usize {
+        return if (a.show_folders) a.folders.len() else a.list.len();
+    }
+
+    /// The row the cursor is on, in whichever space the window is drawing.
+    fn playlistCursorRow(a: *App) usize {
+        return if (a.show_folders) a.folder_cursor else a.list.cursor;
+    }
+
+    /// Mark the grouping for a rebuild. Everything that changes the list
+    /// calls this; the rebuild itself happens once, before the next frame.
+    fn touchPlaylist(a: *App) void {
+        a.folders_stale = true;
+    }
+
+    /// Bring the grouping up to date if it is both wanted and stale. The
+    /// track-count check is a backstop: a list edit that forgot to call
+    /// `touchPlaylist` would otherwise draw rows that point at entries which
+    /// have moved.
+    fn refreshFolders(a: *App) void {
+        if (!a.show_folders) return;
+        if (!a.folders_stale and a.folders.trackCount() == a.list.len()) return;
+        a.folders.rebuild(a.list) catch {
+            // Out of memory for a view of a list already in hand. Falling
+            // back to flat is honest; drawing a stale grouping is not.
+            a.show_folders = false;
+            return;
+        };
+        a.folders_stale = false;
+        a.setFolderCursor(a.folder_cursor);
+    }
+
+    fn toggleFolders(a: *App) void {
+        a.show_folders = !a.show_folders;
+        a.follow_cursor = true;
+        if (!a.show_folders) return;
+
+        a.folders_stale = true;
+        a.refreshFolders();
+        if (!a.show_folders) return;
+
+        // Folding everything is the point of the mode: a 1,457-track library
+        // becomes a hundred-odd folders you can actually look at. Reopening
+        // the folder the cursor was in would undo that on the spot — a
+        // thirteen-track album fills the window and the mode looks like it
+        // did nothing — so the cursor goes to that folder's header instead.
+        // The place is kept; `right` gets back inside.
+        a.folders.setAll(a.list, true) catch {};
+        if (a.folders.groupOf(a.list.cursor)) |g| {
+            if (a.folders.headerRow(g)) |row| a.setFolderCursor(row);
+        }
+    }
+
+    /// Unfold whatever holds `entry` and put the row cursor on it.
+    fn revealInFolders(a: *App, entry: usize) void {
+        const group = a.folders.groupOf(entry) orelse return;
+        a.folders.setCollapsed(a.list, group, false) catch {};
+        a.setFolderCursor(a.folders.rowOf(entry) orelse
+            a.folders.headerRow(group) orelse 0);
+    }
+
+    fn setFolderCursor(a: *App, row: usize) void {
+        const count = a.folders.len();
+        if (count == 0) {
+            a.folder_cursor = 0;
+            return;
+        }
+        a.folder_cursor = @min(row, count - 1);
+        // The entry cursor trails the row cursor, so playing, deleting and
+        // reordering all act on what is highlighted. On a header it stays
+        // where it was; the header's own keys work on the group instead.
+        if (a.folders.entryAt(a.folder_cursor)) |e| a.list.cursor = e;
+    }
+
+    fn setGroupCollapsed(a: *App, group: usize, collapsed: bool) void {
+        a.folders.setCollapsed(a.list, group, collapsed) catch return;
+        // The rows below just moved; hold the cursor on the same header.
+        if (a.folders.headerRow(group)) |row| a.setFolderCursor(row);
+        a.follow_cursor = true;
+    }
+
+    /// Returns true when the key was consumed by the grouped playlist.
+    fn folderKey(a: *App, key: input.Key, mods: input.Mods) bool {
+        const count = a.folders.len();
+        if (count == 0) return false;
+        const page = @max(a.playlistRows(), 1);
+
+        switch (key) {
+            .up => {
+                if (mods.shift) return a.moveFolderEntry(true);
+                a.setFolderCursor(a.folder_cursor -| 1);
+                return true;
+            },
+            .down => {
+                if (mods.shift) return a.moveFolderEntry(false);
+                a.setFolderCursor(a.folder_cursor + 1);
+                return true;
+            },
+            .page_up => {
+                a.setFolderCursor(a.folder_cursor -| page);
+                return true;
+            },
+            .page_down => {
+                a.setFolderCursor(a.folder_cursor + page);
+                return true;
+            },
+            .home => {
+                a.setFolderCursor(0);
+                return true;
+            },
+            .end => {
+                a.setFolderCursor(count - 1);
+                return true;
+            },
+            // Left and right walk the tree: out of a folder and into one.
+            .left => {
+                switch (a.folders.rowAt(a.folder_cursor) orelse return true) {
+                    .track => |e| if (a.folders.groupOf(e)) |g| {
+                        if (a.folders.headerRow(g)) |row| a.setFolderCursor(row);
+                    },
+                    .folder => |g| if (a.folders.groups.items[g].collapsed) {
+                        // Already shut, so go to the folder above rather than
+                        // doing nothing.
+                        if (g > 0) {
+                            if (a.folders.headerRow(g - 1)) |row| a.setFolderCursor(row);
+                        }
+                    } else {
+                        a.setGroupCollapsed(g, true);
+                    },
+                }
+                return true;
+            },
+            .right => {
+                switch (a.folders.rowAt(a.folder_cursor) orelse return true) {
+                    .track => {},
+                    .folder => |g| if (a.folders.groups.items[g].collapsed) {
+                        a.setGroupCollapsed(g, false);
+                    } else {
+                        a.setFolderCursor(a.folder_cursor + 1);
+                    },
+                }
+                return true;
+            },
+            .enter => {
+                switch (a.folders.rowAt(a.folder_cursor) orelse return true) {
+                    .folder => |g| a.setGroupCollapsed(
+                        g,
+                        !a.folders.groups.items[g].collapsed,
+                    ),
+                    .track => a.playCursor(),
+                }
+                return true;
+            },
+            .delete => {
+                a.removeAtFolderCursor();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// Shift-arrow still reorders, and still reorders *entries*: a track
+    /// dragged past a folder boundary really does change folder, which is
+    /// the honest consequence of groups being runs of the list.
+    fn moveFolderEntry(a: *App, up: bool) bool {
+        const entry = a.folders.entryAt(a.folder_cursor) orelse return true;
+        const target = if (up)
+            (if (entry == 0) return true else entry - 1)
+        else
+            (if (entry + 1 >= a.list.len()) return true else entry + 1);
+
+        a.list.move(entry, target);
+        a.touchPlaylist();
+        a.refreshFolders();
+        if (a.folders.rowOf(target)) |row| a.setFolderCursor(row);
+        return true;
+    }
+
+    /// Delete takes the row at its word: a track, or a folder and every
+    /// track under it.
+    fn removeAtFolderCursor(a: *App) void {
+        switch (a.folders.rowAt(a.folder_cursor) orelse return) {
+            .track => |e| a.list.remove(e),
+            .folder => |g| {
+                const group = a.folders.groups.items[g];
+                // Backwards, so the indices still to be removed stay valid.
+                var i = group.first + group.count;
+                while (i > group.first) : (i -= 1) a.list.remove(i - 1);
+            },
+        }
+        a.touchPlaylist();
+        a.refreshFolders();
+    }
+
     /// Returns true when the key was consumed by the playlist.
     fn handlePlaylistKey(a: *App, key: input.Key, mods: input.Mods) bool {
-        const consumed = a.playlistKey(key, mods);
+        const consumed = if (a.show_folders)
+            a.folderKey(key, mods)
+        else
+            a.playlistKey(key, mods);
         // Any key the playlist took may have moved the cursor, so let the
         // view catch up with it on the next frame.
         if (consumed) a.follow_cursor = true;
@@ -569,6 +786,7 @@ pub const App = struct {
                     // Shift-arrow moves the entry, not the cursor.
                     if (a.list.cursor > 0) {
                         a.list.move(a.list.cursor, a.list.cursor - 1);
+                        a.touchPlaylist();
                     }
                 } else {
                     a.list.cursor -|= 1;
@@ -579,6 +797,7 @@ pub const App = struct {
                 if (mods.shift) {
                     if (a.list.cursor < last) {
                         a.list.move(a.list.cursor, a.list.cursor + 1);
+                        a.touchPlaylist();
                     }
                 } else {
                     a.list.cursor = @min(a.list.cursor + 1, last);
@@ -607,6 +826,7 @@ pub const App = struct {
             },
             .delete => {
                 a.list.remove(a.list.cursor);
+                a.touchPlaylist();
                 return true;
             },
             else => return false,
@@ -831,6 +1051,11 @@ pub const App = struct {
         a.list.cursor = idx;
         a.follow_cursor = true;
         if (!a.playlist_open) a.playlist_open = true;
+        // A folded folder would hide the very thing this key is for.
+        if (a.show_folders) {
+            a.refreshFolders();
+            a.revealInFolders(idx);
+        }
     }
 
     fn handleMouse(a: *App, m: input.Mouse) void {
@@ -1031,7 +1256,7 @@ pub const App = struct {
         const l = playlist_window.Layout.compute(a.playlist_origin.w, a.playlist_origin.h);
         const local = a.playlist_origin.localize(point) orelse return;
 
-        switch (l.hitTest(local, a.playlist_scroll, a.list.len())) {
+        switch (l.hitTest(local, a.playlist_scroll, a.playlistRowCount())) {
             .close => a.togglePlaylist(),
             .shade => a.togglePlaylist(),
             .scrollbar => |target| {
@@ -1046,7 +1271,23 @@ pub const App = struct {
                 else
                     false;
 
-                a.list.cursor = index;
+                if (a.show_folders) {
+                    a.setFolderCursor(index);
+                    // One click on a header folds or unfolds it: a folder is
+                    // not a thing you can play, so there is nothing for a
+                    // second click to mean.
+                    if (a.folders.rowAt(index)) |r| switch (r) {
+                        .folder => |g| {
+                            a.setGroupCollapsed(g, !a.folders.groups.items[g].collapsed);
+                            a.last_click = null;
+                            return;
+                        },
+                        .track => {},
+                    };
+                } else {
+                    a.list.cursor = index;
+                }
+
                 if (is_double) {
                     a.playCursor();
                     a.last_click = null;
@@ -1215,20 +1456,27 @@ pub const App = struct {
             // without the caller thinking about it; otherwise the view stays
             // where the user scrolled it to and is only held in range.
             const l = playlist_window.Layout.compute(w, pl_h);
+            // The grouping has to be right before the scroll is settled
+            // against it, or the view is clamped to a row count that is one
+            // edit out of date.
+            a.refreshFolders();
+            const count = a.playlistRowCount();
             a.playlist_scroll = if (a.follow_cursor)
                 playlist_window.scrollToShow(
                     a.playlist_scroll,
-                    a.list.cursor,
-                    a.list.len(),
+                    a.playlistCursorRow(),
+                    count,
                     l.capacity(),
                 )
             else
-                playlist_window.clampScroll(a.playlist_scroll, a.list.len(), l.capacity());
+                playlist_window.clampScroll(a.playlist_scroll, count, l.capacity());
             a.follow_cursor = false;
             playlist_window.draw(a.screen.painter(a.playlist_origin), l, .{
                 .theme = a.theme,
                 .focused = a.focus == .playlist,
                 .scroll = a.playlist_scroll,
+                .cursor_row = a.playlistCursorRow(),
+                .folders = if (a.show_folders) &a.folders else null,
             }, a.list);
         }
 
