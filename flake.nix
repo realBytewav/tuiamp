@@ -18,7 +18,7 @@
 
         tuiamp = pkgs.stdenv.mkDerivation {
           pname = "tuiamp";
-          version = "0.2.0";
+          version = "0.3.0";
 
           # Only the files the build actually reads. The local .zig-cache is
           # measured in gigabytes and must never reach the store.
