@@ -24,6 +24,14 @@ pub const Glyphs = struct {
     bars: [9]u21,
     /// Nine levels of left-to-right fill, for horizontal meters.
     hbars: [9]u21,
+    /// Whether `bars` are true partial-coverage blocks, where the unpainted
+    /// part of a glyph is exactly the complement of the painted part. The
+    /// equalizer fills a slider downward from centre by drawing a
+    /// lower-block glyph with the two colours swapped, which only reads
+    /// correctly under that property. A symbolic ladder like `ascii`'s
+    /// `. : | #` has no such complement, so those themes fall back to the
+    /// coarser half-block fill.
+    block_fill: bool,
     /// Window frame: horizontal, vertical, and the four corners.
     h: u21,
     v: u21,
@@ -63,6 +71,7 @@ pub const Glyphs = struct {
     pub const unicode: Glyphs = .{
         .bars = .{ ' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█' },
         .hbars = .{ ' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█' },
+        .block_fill = true,
         .h = '─',
         .v = '│',
         .tl = '┌',
@@ -315,6 +324,8 @@ pub const File = struct {
         /// Nine strings, empty to full.
         bars: [9][]const u8,
         hbars: [9][]const u8,
+        /// Leave it out unless `bars` are not real block glyphs.
+        block_fill: bool = true,
         h: []const u8,
         v: []const u8,
         tl: []const u8,
@@ -375,6 +386,7 @@ pub fn fromFile(f: File) Theme {
     t.glyphs = .{
         .bars = bars,
         .hbars = hbars,
+        .block_fill = gf.block_fill,
         .h = firstCodepoint(gf.h, d.h),
         .v = firstCodepoint(gf.v, d.v),
         .tl = firstCodepoint(gf.tl, d.tl),

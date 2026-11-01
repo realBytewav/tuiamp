@@ -70,9 +70,21 @@ t elapsed / remaining      g cycle analyzer        q      quit
 ? keys, then what it does  ctrl+p settings
 ```
 
-Mouse: drag the seek, volume, balance, equalizer and playlist-scroll
-sliders; click the transport buttons; double-click a playlist row; the wheel
-sets volume, or scrolls the playlist.
+With the equalizer focused, `up`/`down` move the selected band by 1.5 dB and
+`shift` makes that 0.5; `0` resets the band under the cursor and `shift+0`
+resets the lot.
+
+Mouse: drag the seek, volume, balance and playlist-scroll sliders; click the
+transport buttons; double-click a playlist row; the wheel sets volume, or
+scrolls the playlist.
+
+The equalizer bands are the exception, because a row of cells is a clumsy
+unit to set a gain in: dragging a band and scrolling it move it by the same
+half a decibel, one row of travel to one wheel notch, so a drag refines the
+value instead of snapping to the nine rows of the track. Pressing the track
+away from the bar does still jump there in 3 dB steps, which is how you
+cross the range in one go; pressing the bar itself — or holding shift
+anywhere — takes hold of the value as it stands.
 
 ## What it does
 
@@ -89,7 +101,13 @@ sets volume, or scrolls the playlist.
   UI runs a windowed FFT over it and draws a log-spaced spectrum with falling
   peak caps, or an oscilloscope at half-block resolution.
 - **Equalizer**: ten bands at Winamp's frequencies plus a preamp, ±12 dB, as a
-  chain of peaking biquads, with Winamp's stock presets.
+  chain of peaking biquads, with Winamp's stock presets. A slider is nine rows
+  tall but resolves about a third of a decibel: each cell is filled in
+  eighths, and because Unicode has eighths that grow up from the bottom of a
+  cell but nothing between `▔` and `▀` growing down from the top, the
+  downward half is the same glyph drawn with the foreground and background
+  swapped, which paints the complement. The exact value sits in the titlebar,
+  where Winamp put it.
 - **Themes**: palette and glyph set in a ZON file. Seven are built in —
   `classic`, `ascii`, `amber` (monochrome phosphor), `gruvbox`, `neon`
   (synthwave), `nord`, and `paper`, the one for a light terminal. Pick one
@@ -131,7 +149,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 256 unit + 10 end-to-end tests
+zig build test            # 262 unit + 11 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries
@@ -151,8 +169,9 @@ The **end-to-end tests** allocate a pseudo-terminal, exec the real binary on
 it, type at it, and assert on what it draws and how it exits — that the
 window appears, that keys reach it, that it keeps redrawing while playing,
 that a scrolled playlist stays where it was put, that `ctrl+p` really
-repaints the player in another theme rather than just listing one, and that
-it hands the terminal back.
+repaints the player in another theme rather than just listing one, that
+`shift+up` on an equalizer band lands on a gain none of the slider's nine
+rows can express, and that it hands the terminal back.
 They replay the output into a cell grid first, because the renderer emits
 only the cells that changed: a playlist row reading `30. Scroll 30` after a
 scroll is assembled from whatever differed from the frame before and need

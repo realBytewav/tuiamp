@@ -78,9 +78,16 @@ pub const ThemeSource = struct {
     resolved: Theme,
 };
 
-/// One keypress of a slider, in decibels. Matches the half-row resolution
-/// the EQ window draws at, so every press visibly moves the thumb.
+/// One keypress of a slider, in decibels. A round number, and large enough
+/// that holding an arrow key crosses the range at a useful speed.
 const eq_key_step: f32 = 1.5;
+/// The fine step, and the only one the mouse uses: shift+arrow, one wheel
+/// notch, and one row of pointer travel in a drag all move a control by
+/// this much. Bigger than one of the window's sub-rows — about a third of a
+/// decibel — so every adjustment visibly moves the bar, and small enough
+/// that the range takes forty-nine of them rather than nine. Unlike a click
+/// it is not quantized to the geometry of the track at all.
+const eq_fine_step: f32 = 0.5;
 
 pub const App = struct {
     gpa: Allocator,
@@ -140,6 +147,10 @@ pub const App = struct {
     /// cursor is applied as you move, so there has to be a way home.
     theme_before_settings: ?struct { theme: Theme, name: []const u8 } = null,
     drag: Drag = .none,
+    /// Where a fine EQ drag is measured from: the pointer row it was last
+    /// anchored at, and the gain the control held there. A relative gesture
+    /// can land on any value, which an absolute row cannot.
+    eq_drag_ref: struct { row: i32 = 0, gain: f32 = 0 } = .{},
     frames: u32 = 0,
 
     /// Where each window was last drawn, for routing mouse coordinates.
@@ -749,6 +760,10 @@ pub const App = struct {
         a.publishEq();
     }
 
+    fn eqStep(mods: input.Mods) f32 {
+        return if (mods.shift) eq_fine_step else eq_key_step;
+    }
+
     /// Returns true when the key was consumed by the equalizer.
     fn handleEqKey(a: *App, key: input.Key, mods: input.Mods) bool {
         switch (key) {
@@ -761,11 +776,11 @@ pub const App = struct {
                 return true;
             },
             .up => {
-                a.setEqGain(a.eq_cursor, a.eqGain(a.eq_cursor) + eq_key_step);
+                a.setEqGain(a.eq_cursor, a.eqGain(a.eq_cursor) + eqStep(mods));
                 return true;
             },
             .down => {
-                a.setEqGain(a.eq_cursor, a.eqGain(a.eq_cursor) - eq_key_step);
+                a.setEqGain(a.eq_cursor, a.eqGain(a.eq_cursor) - eqStep(mods));
                 return true;
             },
             .home => {
@@ -829,8 +844,15 @@ pub const App = struct {
         // The wheel is Winamp's volume control wherever the pointer sits,
         // except over the playlist, where it scrolls.
         if (m.button == .wheel_up or m.button == .wheel_down) {
+            const at: Point = .{ .x = m.x, .y = m.y };
+            // Over a band or the preamp the wheel is the fine control, which
+            // is what makes any value reachable with the mouse: a click can
+            // only land on one of nine rows, a notch is a quarter of one.
+            if (a.eq_open and a.eq_origin.contains(at)) {
+                if (a.wheelEq(at, m.button == .wheel_up)) return;
+            }
             const over_playlist = a.playlist_open and
-                a.playlist_origin.contains(.{ .x = m.x, .y = m.y });
+                a.playlist_origin.contains(at);
             if (over_playlist) {
                 const delta: usize = 3;
                 if (m.button == .wheel_up) {
@@ -868,7 +890,7 @@ pub const App = struct {
             return;
         }
         if (a.eq_open and a.eq_origin.contains(point)) {
-            a.pressEq(point);
+            a.pressEq(point, m.mods);
             return;
         }
         if (a.main_origin.contains(point)) a.pressMain(point);
@@ -894,7 +916,27 @@ pub const App = struct {
         }
     }
 
-    fn pressEq(a: *App, point: Point) void {
+    /// A wheel notch on an EQ slider. False when the pointer is elsewhere in
+    /// the window — the titlebar, the toggles — so the wheel keeps its usual
+    /// meaning there.
+    fn wheelEq(a: *App, point: Point, up: bool) bool {
+        const l: eq_window.Layout = .compute();
+        const local = a.eq_origin.localize(point) orelse return false;
+        const delta: f32 = if (up) eq_fine_step else -eq_fine_step;
+        const control: usize = switch (l.hitTest(local)) {
+            .preamp => 0,
+            .band => |b| b.index + 1,
+            else => return false,
+        };
+        // The readout follows the pointer, but focus does not: the wheel is
+        // not a click, and should not take the arrow keys away from whatever
+        // window has them.
+        a.eq_cursor = control;
+        a.setEqGain(control, a.eqGain(control) + delta);
+        return true;
+    }
+
+    fn pressEq(a: *App, point: Point, mods: input.Mods) void {
         a.focus = .eq;
         const l: eq_window.Layout = .compute();
         const local = a.eq_origin.localize(point) orelse return;
@@ -910,15 +952,38 @@ pub const App = struct {
             .preamp => |gain| {
                 a.drag = .eq_preamp;
                 a.eq_cursor = 0;
-                a.setEqGain(0, gain);
+                a.grabEqSlider(0, l.preamp, local.y, gain, mods.shift);
             },
             .band => |b| {
                 a.drag = .{ .eq_band = b.index };
                 a.eq_cursor = b.index + 1;
-                a.setEqGain(b.index + 1, b.gain_db);
+                a.grabEqSlider(b.index + 1, l.bands[b.index], local.y, b.gain_db, mods.shift);
             },
             else => {},
         }
+    }
+
+    /// Take hold of an EQ slider. Pressing on the tip of the bar grabs the
+    /// value as it stands, the way grabbing a scrollbar's thumb does;
+    /// pressing anywhere else on the track jumps to that row first, which is
+    /// what Winamp's sliders did and what the three-decibel rows are for.
+    /// Shift grabs without jumping wherever the pointer happens to be.
+    ///
+    /// Either way the drag that follows is relative, so a value set by the
+    /// wheel survives being picked up and refined.
+    fn grabEqSlider(
+        a: *App,
+        control: usize,
+        rect: Rect,
+        window_row: u16,
+        row_gain: f32,
+        shift: bool,
+    ) void {
+        const current = a.eqGain(control);
+        const on_thumb = (window_row -| rect.y) == eq_window.rowForGain(current);
+        const gain = if (shift or on_thumb) current else row_gain;
+        a.eq_drag_ref = .{ .row = @intCast(window_row), .gain = gain };
+        if (gain != current) a.setEqGain(control, gain);
     }
 
     fn pressMain(a: *App, point: Point) void {
@@ -1018,23 +1083,21 @@ pub const App = struct {
                     else => unreachable,
                 }
             },
-            // EQ sliders are vertical, so the row is what matters.
+            // EQ sliders are vertical, so the row is what matters. The
+            // drag is relative, one row to a wheel notch, which is the whole
+            // point: an absolute row can only ever name one of nine values,
+            // and a slider that jumps in three-decibel steps under the
+            // pointer is the thing that felt notchy. Nor is it clamped to
+            // the track — travelling past the end keeps adjusting.
             .eq_preamp, .eq_band => {
                 const win_y: i32 = @as(i32, m.y) - @as(i32, a.eq_origin.y);
-                const l: eq_window.Layout = .compute();
-                const rect = switch (a.drag) {
-                    .eq_preamp => l.preamp,
-                    .eq_band => |i| l.bands[@min(i, eq.band_count - 1)],
-                    else => unreachable,
-                };
-                const row = std.math.clamp(win_y - @as(i32, rect.y), 0, @as(i32, rect.h) - 1);
-                const gain = eq_window.gainForRow(@intCast(row));
                 const control: usize = switch (a.drag) {
                     .eq_preamp => 0,
                     .eq_band => |i| i + 1,
                     else => unreachable,
                 };
-                a.setEqGain(control, gain);
+                const moved: f32 = @floatFromInt(a.eq_drag_ref.row - win_y);
+                a.setEqGain(control, a.eq_drag_ref.gain + moved * eq_fine_step);
             },
             // The scrollbar is vertical too, and its row maps straight onto
             // a scroll position, so the thumb follows the pointer exactly.

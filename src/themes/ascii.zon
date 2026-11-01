@@ -36,6 +36,10 @@
     .glyphs = .{
         .bars = .{ " ", ".", ".", ":", ":", "|", "|", "#", "#" },
         .hbars = .{ " ", " ", ".", ".", "-", "-", "=", "=", "#" },
+        // A density ladder, not partial blocks: "#" does not leave the rest
+        // of its cell blank, so the equalizer cannot invert it to fill
+        // downward. These sliders get half-row resolution instead.
+        .block_fill = false,
         .h = "-",
         .v = "|",
         .tl = "+",

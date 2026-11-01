@@ -416,6 +416,112 @@ test "keys reach the windows: the equalizer opens and its presets cycle" {
     try testing.expectEqual(@as(?u8, 0), r.exit);
 }
 
+/// Two phases: send `keys`, read back where the equalizer was drawn, then
+/// send whatever `then` makes of that. Mouse reports carry absolute screen
+/// cells, so they cannot be written down until the window has a position.
+fn runPlayerThenMouse(
+    gpa: std.mem.Allocator,
+    keys: []const u8,
+    then: *const fn (eq_row: u16, buf: []u8) []const u8,
+) !struct {
+    output: []u8,
+    exit: ?u8,
+} {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTone(tmp.dir, "tone.wav");
+
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const track = try std.fs.path.joinZ(gpa, &.{ root, "tone.wav" });
+    defer gpa.free(track);
+
+    var session = try Session.start(&.{
+        exe_path,
+        "--null-audio",
+        "--no-config",
+        "--volume",
+        "50",
+        track.ptr,
+    });
+    defer session.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    try session.pump(&out, gpa, 2500);
+    session.send(keys);
+    try session.pump(&out, gpa, 600);
+
+    var term: Term = .init();
+    term.feed(out.items);
+    const eq_row = term.rowContaining("Equalizer") orelse return error.NoEqualizerDrawn;
+
+    var buf: [128]u8 = undefined;
+    session.send(then(eq_row, &buf));
+    try session.pump(&out, gpa, 600);
+
+    session.send("q");
+    try session.pump(&out, gpa, 600);
+
+    return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
+}
+
+/// Press on the zero tick of the first band, drag two rows up, release.
+/// Band 0's slider is column 14 of an 80-wide window centred in these 92
+/// columns; the sliders begin three rows under the titlebar, and the tick is
+/// four rows below that. SGR reports are 1-based.
+fn pressAndDragBandUp(eq_row: u16, buf: []u8) []const u8 {
+    const x = 6 + 14 + 1;
+    const tick = eq_row + 3 + 4 + 1;
+    return std.fmt.bufPrint(
+        buf,
+        "\x1b[<0;{d};{d}M\x1b[<32;{d};{d}M\x1b[<0;{d};{d}m",
+        .{ x, tick, x, tick - 2, x, tick - 2 },
+    ) catch unreachable;
+}
+
+test "dragging a band moves it by the wheel's step, not the track's rows" {
+    const gpa = testing.allocator;
+    // The band starts flat, so the press lands on its own thumb and takes
+    // hold of it rather than jumping. Two rows of travel is then two fine
+    // steps: +1.0 dB, which is not a value any of the nine rows can name.
+    const r = try runPlayerThenMouse(gpa, "\x1bg", pressAndDragBandUp);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+
+    try testing.expect(term.contains("60 Hz: +1.0 dB"));
+    // An absolute drag would have read the row under the pointer instead,
+    // which two rows above centre is +6.
+    try testing.expect(!term.contains("60 Hz: +6.0 dB"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
+test "shift+arrow reaches a gain the slider's own rows cannot" {
+    const gpa = testing.allocator;
+    // alt+g opens the equalizer and tab focuses it. The cursor starts on the
+    // preamp, so two shift+ups are two fine steps: +1.0 dB, which is neither
+    // a multiple of the 1.5 dB keypress nor one of the nine 3 dB rows a
+    // click can land on. Reading it back off the titlebar proves the whole
+    // chain — key decoding, the fine step, the gain, the readout — rather
+    // than any one end of it.
+    const shift_up = "\x1b[1;2A";
+    const r = try runPlayer(gpa, "\x1bg\t" ++ shift_up ++ shift_up, 2500);
+    defer gpa.free(r.output);
+
+    var term: Term = .init();
+    term.feed(r.output);
+
+    try testing.expect(term.contains("preamp: +1.0 dB"));
+    // Had the shift been dropped on the way in, the same two presses would
+    // have landed on +3.0 instead.
+    try testing.expect(!term.contains("preamp: +3.0 dB"));
+    try testing.expectEqual(@as(?u8, 0), r.exit);
+}
+
 test "the analyzer renders real audio, not just its baseline" {
     const gpa = testing.allocator;
     const r = try runPlayer(gpa, "", 1200);
@@ -423,8 +529,10 @@ test "the analyzer renders real audio, not just its baseline" {
 
     // The analyzer's bar glyphs are U+2581..U+2588. At rest it draws only
     // the U+2581 baseline, so anything taller is a bar that was driven by
-    // PCM arriving through the tap. Those codepoints appear nowhere else:
-    // the horizontal meters use U+258F..U+2589, and the sliders use U+2588.
+    // PCM arriving through the tap. Nothing else on screen here draws them:
+    // the horizontal meters use U+258F..U+2589, and the equalizer — whose
+    // sliders now fill in these same eighths — is closed until alt+g opens
+    // it, which this test does not.
     const mid_bars = [_][]const u8{ "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}" };
     var saw_bar = false;
     for (mid_bars) |g| {

@@ -59,10 +59,10 @@ const key_lines = [_][]const u8{
     "  j  jump to playing track        home / end     first / last",
     "  g  analyzer: spectrum, scope, off",
     "EQUALIZER  (when focused)      MOUSE",
-    "  left / right  select band      drag the sliders",
-    "  up / down     adjust           click the buttons",
-    "  o  on / off   p  preset        double-click a playlist row",
-    "  0  reset band   shift+0  all   wheel: volume, or scroll",
+    "  left / right   select band     drag or scroll a band: 0.5 dB",
+    "  up / down  +/-1.5, shift 0.5   click the track: jump there",
+    "  o  on / off   p  preset        click buttons, 2x-click a row",
+    "  0  reset band   shift+0  all   wheel elsewhere: volume/scroll",
 };
 
 /// What it can actually do. Kept in step with the README's "What it does"
@@ -83,6 +83,7 @@ const feature_lines = [_][]const u8{
     "  a windowed fft spectrum with falling peak caps, or an",
     "  oscilloscope at half-block resolution.  g cycles them.",
     "  ten bands at winamp's frequencies, +/- 12 dB, and a preamp.",
+    "  the sliders resolve a third of a dB, shown in the titlebar.",
     "THEMES",
     "  palette and glyphs in a zon file.  ctrl+p lists the built-ins",
     "  and whatever is in ~/.config/tuiamp/themes/, previewing live.",
