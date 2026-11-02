@@ -33,6 +33,11 @@ pub const Tags = struct {
     sample_rate: u32 = 0,
     channels: u32 = 0,
     bitrate_kbps: u32 = 0,
+    /// Dead samples the encoder wrote into the file, at `sample_rate`: at the
+    /// head, and at the tail. Both zero for FLAC and WAV, which store what
+    /// they were given, and for an MP3 that does not say.
+    encoder_delay: u32 = 0,
+    encoder_padding: u32 = 0,
 
     pub fn deinit(t: *Tags, gpa: Allocator) void {
         if (t.title) |v| gpa.free(v);
@@ -149,6 +154,8 @@ pub fn parseBytes(gpa: Allocator, prefix: []const u8, file_size: u64) !Tags {
         tags.sample_rate = info.sample_rate;
         tags.channels = info.channels;
         tags.bitrate_kbps = info.bitrate_kbps;
+        tags.encoder_delay = info.gap.delay;
+        tags.encoder_padding = info.gap.padding;
     }
     return tags;
 }

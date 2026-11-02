@@ -97,6 +97,24 @@ anywhere — takes hold of the value as it stands.
   reordering, shuffle as a permutation over a fixed view, repeat off/all/one.
   The scrollbar lives in the window's right-hand border, where Winamp put
   its own, so it costs no title width.
+- **Gapless playback**: a join between two tracks is a single instant on
+  miniaudio's global clock. A few seconds from the end the next track is
+  opened and told to start at that instant, while the outgoing one is told to
+  stop at it, so the handover happens inside the audio thread with sample
+  accuracy — nothing about it waits for a frame of the UI loop, and giving the
+  outgoing track a stop time is what makes an overlap impossible rather than
+  merely unlikely.
+
+  MP3 carries its own silence: frames are a fixed 1152 samples, so an encoder
+  buffers a little before the music and pads out to a frame boundary after it.
+  miniaudio hands back the whole nominal stream, so tuiamp reads the dead
+  sample counts out of the LAME tag the Xing header carries — the parser was
+  already walking to that header for durations — and skips them, which is what
+  turns "no silence the player inserted" into "no silence at all". Shuffle
+  with repeat-all has one ordinary track change per time round the playlist,
+  where the next entry genuinely does not exist yet: the permutation is thrown
+  away and rebuilt at the wrap, and a guess is worse than a gap.
+
 - **Folder mode**: `f` — or the `▤` button in the playlist titlebar, which
   is lit while the mode is on — groups the playlist by the folder each track
   came from, with per-folder track counts and running times, and folds them away
@@ -138,7 +156,6 @@ anywhere — takes hold of the value as it stands.
 - **No Ogg Vorbis, Opus or AAC.** miniaudio decodes MP3, FLAC and WAV; the
   rest would need stb_vorbis or libopus wired in through
   `ma_decoding_backend_vtable`.
-- **No gapless playback.** Tracks are opened one at a time.
 - **No double-size mode.** Winamp's Ctrl+D doubles the window; here it would
   mean a second set of layout constants for every widget, which is more
   machinery than the feature is worth.
@@ -163,7 +180,7 @@ error rather than silence. `tuiamp --devices` shows what is visible.
 ```sh
 zig build                 # debug
 zig build -Doptimize=ReleaseFast
-zig build test            # 282 unit + 16 end-to-end tests
+zig build test            # 312 unit + 17 end-to-end tests
 zig build test-unit       # just the unit tests
 zig build test-e2e        # just the end-to-end ones
 nix develop               # a shell with the right Zig and libraries

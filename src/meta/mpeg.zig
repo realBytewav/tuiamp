@@ -88,6 +88,21 @@ pub const Info = struct {
     /// True when the duration came from a VBR header rather than from
     /// dividing the file size by a bitrate.
     exact: bool = false,
+    /// What the encoder said about the silence it added. Zero unless the
+    /// file carries a LAME-style tag.
+    gap: Gap = .{},
+};
+
+/// Dead samples an encoder wrote into the file, at the file's own rate.
+///
+/// MPEG frames cover a fixed 1152 samples each, so an encoder has to pad the
+/// material out to a frame boundary and buffer a little before it can emit
+/// anything at all. Both ends therefore carry silence that is in the file but
+/// was never in the music, and the only record of how much is the tag LAME
+/// introduced and other encoders copied.
+pub const Gap = struct {
+    delay: u32 = 0,
+    padding: u32 = 0,
 };
 
 /// Work out duration and bitrate from the first frame.
@@ -105,6 +120,8 @@ pub fn probe(head: []const u8, audio_bytes: u64) Info {
         .channels = h.channels,
     };
     if (h.sample_rate == 0) return info;
+
+    if (encoderGap(head[offset..], h)) |g| info.gap = g;
 
     const spf: f32 = @floatFromInt(h.samplesPerFrame());
     const rate: f32 = @floatFromInt(h.sample_rate);
@@ -130,12 +147,56 @@ pub fn probe(head: []const u8, audio_bytes: u64) Info {
 const Vbr = struct { frames: u64, bytes: u64 };
 
 /// Xing and Info live at a version- and channel-dependent offset inside the
-/// first frame; VBRI always sits 32 bytes in.
-fn vbrFrameCount(frame: []const u8, h: FrameHeader) ?Vbr {
-    const xing_offset: usize = 4 + switch (h.version) {
+/// first frame, past the side information.
+fn xingOffset(h: FrameHeader) usize {
+    return 4 + switch (h.version) {
         .mpeg1 => @as(usize, if (h.channels == 1) 17 else 32),
         .mpeg2, .mpeg25 => @as(usize, if (h.channels == 1) 9 else 17),
     };
+}
+
+/// The encoder's own record of the silence it added, read out of the LAME
+/// extension inside a Xing or Info header.
+///
+/// Read separately from the frame count, because a constant-bitrate encode
+/// writes an `Info` header with no frame count at all — `vbrFrameCount`
+/// rightly declines that one — and still describes its gap perfectly well.
+pub fn encoderGap(frame: []const u8, h: FrameHeader) ?Gap {
+    const xing = xingOffset(h);
+    if (frame.len < xing + 8) return null;
+    const tag = frame[xing..][0..4];
+    if (!std.mem.eql(u8, tag, "Xing") and !std.mem.eql(u8, tag, "Info")) return null;
+
+    // The extension sits at a fixed offset from the tag rather than after the
+    // optional fields: 0x78 for the encoder's name, then the two 12-bit
+    // counts packed into three bytes 0x15 further in.
+    const name_at = xing + 0x78;
+    const gap_at = name_at + 0x15;
+    if (frame.len < gap_at + 3) return null;
+
+    // Everything that writes this tag names itself in printable ASCII —
+    // `LAME`, and ffmpeg's `Lavf` and `Lavc`. Without a name, these bytes
+    // are audio that happens to sit at the right offset.
+    for (frame[name_at..][0..4]) |ch| {
+        if (ch < 0x20 or ch > 0x7e) return null;
+    }
+
+    const b = frame[gap_at..][0..3];
+    const gap: Gap = .{
+        .delay = (@as(u32, b[0]) << 4) | (@as(u32, b[1]) >> 4),
+        .padding = (@as(u32, b[1] & 0x0f) << 8) | @as(u32, b[2]),
+    };
+
+    // An encoder buffers a fraction of a frame and pads out to at most one.
+    // Several frames' worth means the field is not what we think it is, and
+    // trimming on it would cut into the music.
+    const limit = h.samplesPerFrame() * 3;
+    if (gap.delay > limit or gap.padding > limit) return null;
+    return gap;
+}
+
+fn vbrFrameCount(frame: []const u8, h: FrameHeader) ?Vbr {
+    const xing_offset = xingOffset(h);
 
     if (frame.len >= xing_offset + 8) {
         const tag = frame[xing_offset..][0..4];
@@ -399,4 +460,137 @@ test "probing something that is not MPEG yields nothing" {
     const info = probe("RIFF....WAVEfmt ", 16);
     try testing.expectEqual(@as(f32, -1), info.duration);
     try testing.expectEqual(@as(u32, 0), info.sample_rate);
+}
+
+/// A first frame carrying `tag` with a LAME extension in it, naming itself
+/// `name` and declaring `delay` and `padding`.
+fn lameStream(
+    gpa: std.mem.Allocator,
+    tag: []const u8,
+    name: []const u8,
+    delay: u32,
+    padding: u32,
+) ![]u8 {
+    const h = header(9, 0, false);
+    const frame_len = FrameHeader.parse(&h).?.frameBytes();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    try out.appendSlice(gpa, &h);
+    // Stereo MPEG1: the tag sits 32 bytes past the header.
+    try out.appendNTimes(gpa, 0, 32);
+    const tag_at = out.items.len;
+    try out.appendSlice(gpa, tag);
+    var buf: [4]u8 = undefined;
+    // No optional fields: the extension's position does not depend on them.
+    std.mem.writeInt(u32, &buf, 0, .big);
+    try out.appendSlice(gpa, &buf);
+
+    while (out.items.len < tag_at + 0x78) try out.append(gpa, 0);
+    try out.appendSlice(gpa, name);
+    while (out.items.len < tag_at + 0x78 + 0x15) try out.append(gpa, 0);
+    try out.append(gpa, @intCast(delay >> 4));
+    try out.append(gpa, @intCast(((delay & 0xf) << 4) | (padding >> 8)));
+    try out.append(gpa, @intCast(padding & 0xff));
+
+    while (out.items.len < frame_len) try out.append(gpa, 0);
+    // A second real frame, so findSync accepts the first.
+    try out.appendSlice(gpa, &h);
+    try out.appendNTimes(gpa, 0x55, frame_len - 4);
+    return out.toOwnedSlice(gpa);
+}
+
+test "a LAME tag says how much silence is at each end" {
+    const gpa = testing.allocator;
+    // 576 and 1800 are ordinary values: a little over half a frame buffered
+    // at the head, and most of two frames padded at the tail.
+    const stream = try lameStream(gpa, "Xing", "LAME3.100", 576, 1800);
+    defer gpa.free(stream);
+
+    const info = probe(stream, stream.len);
+    try testing.expectEqual(@as(u32, 576), info.gap.delay);
+    try testing.expectEqual(@as(u32, 1800), info.gap.padding);
+}
+
+test "the gap survives a header with no frame count, which CBR encodes write" {
+    const gpa = testing.allocator;
+    const stream = try lameStream(gpa, "Info", "LAME3.100", 1105, 288);
+    defer gpa.free(stream);
+
+    const info = probe(stream, stream.len);
+    // No frame count, so the duration is still the size estimate...
+    try testing.expect(!info.exact);
+    // ...but the gap is read all the same.
+    try testing.expectEqual(@as(u32, 1105), info.gap.delay);
+    try testing.expectEqual(@as(u32, 288), info.gap.padding);
+}
+
+test "ffmpeg's own names for the tag are accepted" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{ "Lavf61.1", "Lavc60.3" }) |name| {
+        const stream = try lameStream(gpa, "Xing", name, 576, 576);
+        defer gpa.free(stream);
+        try testing.expectEqual(@as(u32, 576), probe(stream, stream.len).gap.delay);
+    }
+}
+
+test "the two counts are packed into three bytes without bleeding into each other" {
+    const gpa = testing.allocator;
+    // 0x123 and 0x456 are stored as the bytes 12 34 56, so a shift that is
+    // out by a nibble shows up in both numbers at once. Both are inside the
+    // plausibility limit, which is the point of the next test rather than
+    // this one.
+    const stream = try lameStream(gpa, "Xing", "LAME", 0x123, 0x456);
+    defer gpa.free(stream);
+
+    const info = probe(stream, stream.len);
+    try testing.expectEqual(@as(u32, 0x123), info.gap.delay);
+    try testing.expectEqual(@as(u32, 0x456), info.gap.padding);
+}
+
+test "an unnamed extension is not trusted" {
+    const gpa = testing.allocator;
+    // Zero bytes where the encoder's name belongs: this is audio, not a tag.
+    const stream = try lameStream(gpa, "Xing", &[_]u8{ 0, 0, 0, 0 }, 576, 576);
+    defer gpa.free(stream);
+
+    const info = probe(stream, stream.len);
+    try testing.expectEqual(@as(u32, 0), info.gap.delay);
+    try testing.expectEqual(@as(u32, 0), info.gap.padding);
+}
+
+test "implausible counts are refused rather than trimmed on" {
+    const gpa = testing.allocator;
+    // Over three frames of samples. Trimming on this would cut into music.
+    const stream = try lameStream(gpa, "Xing", "LAME", 4000, 0);
+    defer gpa.free(stream);
+    try testing.expectEqual(@as(u32, 0), probe(stream, stream.len).gap.delay);
+
+    const tail = try lameStream(gpa, "Xing", "LAME", 0, 4000);
+    defer gpa.free(tail);
+    try testing.expectEqual(@as(u32, 0), probe(tail, tail.len).gap.padding);
+}
+
+test "a file with no Xing header at all has no gap to speak of" {
+    const gpa = testing.allocator;
+    const stream = try cbrStream(gpa, 20, "");
+    defer gpa.free(stream);
+
+    const info = probe(stream, stream.len);
+    try testing.expectEqual(@as(u32, 0), info.gap.delay);
+    try testing.expectEqual(@as(u32, 0), info.gap.padding);
+}
+
+test "a frame cut short before the extension reads no gap" {
+    const gpa = testing.allocator;
+    const stream = try lameStream(gpa, "Xing", "LAME", 576, 576);
+    defer gpa.free(stream);
+
+    // The tag is at 36, the counts at 177. Anything shorter must decline
+    // rather than read past the end.
+    const h = FrameHeader.parse(stream[0..4]).?;
+    for ([_]usize{ 40, 100, 170, 179 }) |len| {
+        try testing.expectEqual(@as(?Gap, null), encoderGap(stream[0..len], h));
+    }
+    try testing.expect(encoderGap(stream[0..180], h) != null);
 }

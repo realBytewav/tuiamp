@@ -996,12 +996,8 @@ test "a file it cannot play is reported, not silently ignored" {
     try testing.expect(std.mem.indexOf(u8, out.items, "nothing") != null);
 }
 
-/// Three short tracks, so playback runs through two track changes on its own.
-///
-/// They are short because under `--null-audio` the device does not pace to the
-/// sample rate (see the note above `runLongPlaylist`): every tone is exhausted
-/// within the first second however long it claims to be, which is exactly what
-/// this test wants — two joins, with no waiting.
+/// Three tracks, the first brief, so playback runs through exactly one track
+/// change on its own and then stays put.
 fn runThreeTracks(gpa: std.mem.Allocator) !struct {
     output: []u8,
     exit: ?u8,
@@ -1011,9 +1007,13 @@ fn runThreeTracks(gpa: std.mem.Allocator) !struct {
     defer tmp.cleanup();
 
     // Numbered, so the order they are scanned in is the order they play in.
+    // The first is brief and the rest are long, which pins down where
+    // playback must have got to: past the first join, and nowhere near the
+    // second. A machine under load cannot drift out of that window in either
+    // direction, so nothing here is a race.
     try writeToneSeconds(tmp.dir, "1 Alpha.wav", 1);
-    try writeToneSeconds(tmp.dir, "2 Bravo.wav", 1);
-    try writeToneSeconds(tmp.dir, "3 Charlie.wav", 1);
+    try writeToneSeconds(tmp.dir, "2 Bravo.wav", tone_seconds);
+    try writeToneSeconds(tmp.dir, "3 Charlie.wav", tone_seconds);
 
     const root_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root_path);
@@ -1032,14 +1032,14 @@ fn runThreeTracks(gpa: std.mem.Allocator) !struct {
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    try session.pump(&out, gpa, 2000);
+    try session.pump(&out, gpa, 2500);
     session.send("q");
     try session.pump(&out, gpa, 600);
 
     return .{ .output = try out.toOwnedSlice(gpa), .exit = session.wait(3000) };
 }
 
-test "a track change keeps the marquee and the playlist marker on the same track" {
+test "a track change moves the playlist exactly one step, marker and marquee together" {
     const gpa = testing.allocator;
     const r = try runThreeTracks(gpa);
     defer gpa.free(r.output);
@@ -1061,9 +1061,11 @@ test "a track change keeps the marquee and the playlist marker on the same track
     }
     const marquee_title = playing orelse return error.NoTitleDrawn;
 
-    // At least one track change has happened by now: the tracks are a second
-    // each and this ran for two.
-    try testing.expect(!std.mem.eql(u8, marquee_title, "1 Alpha"));
+    // Exactly the second track: the first has ended, so a join happened, and
+    // the long tracks mean it cannot have gone further. Landing on the third
+    // would mean the handover advanced the playlist and the end-of-track path
+    // advanced it again.
+    try testing.expectEqualStrings("2 Bravo", marquee_title);
 
     // The join happens on the audio thread, and the playlist is moved onto
     // the armed entry afterwards. If that promotion and the move ever

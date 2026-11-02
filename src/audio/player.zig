@@ -36,6 +36,16 @@ pub const TrackInfo = struct {
 
 /// Silence an encoder wrote into the file itself, in samples at the file's own
 /// rate. Zero for formats that store exactly what they were given.
+///
+/// miniaudio hands back the whole nominal stream — measured on real files its
+/// decoded length matches the frame count in the Xing header to within a few
+/// samples, and the music does not begin at sample zero — so the dead samples
+/// at both ends are ours to skip. The music proper occupies
+/// `[delay, length - padding)`.
+///
+/// There is deliberately no decoder-delay term. Some decoders emit a few
+/// hundred samples of their own MDCT warm-up on top of the encoder's; this one
+/// does not, which is what the decoded length agreeing with the header shows.
 pub const Trim = struct {
     /// Dead samples at the head, skipped when the track is loaded.
     delay: u32 = 0,
@@ -62,6 +72,19 @@ const Loaded = struct {
     /// Engine frame at which this track hands over. Zero when nothing is
     /// armed to take over from it.
     join: u64 = 0,
+    /// Where this track is up to, tracked on the engine's clock rather than
+    /// read back from the sound: `base_src` is the source frame it last
+    /// began playing from, and `started_at` the engine frame at which that
+    /// happened. Null while it is not playing.
+    ///
+    /// Measured rather than assumed: for a streamed MP3,
+    /// `ma_sound_get_cursor_in_pcm_frames` advances in coarse jumps and falls
+    /// steadily behind the audio — on a four-minute file it reported 41% of
+    /// the frames actually played, while the same measurement on a WAV
+    /// tracked exactly. A join computed from it would land tens of seconds
+    /// late on most of a library while every WAV test still passed.
+    base_src: u64 = 0,
+    started_at: ?u64 = null,
 
     fn destroy(t: *Loaded, gpa: Allocator) void {
         t.sound.deinit();
@@ -127,14 +150,27 @@ pub const Player = struct {
 
         const owned_path = try p.gpa.dupe(u8, path);
         errdefer p.gpa.free(owned_path);
+
+        // Read unconditionally, rather than only when the title has to come
+        // from here: the encoder's gap is wanted for every track, and this is
+        // where it is known. One prefix read per track change, off the audio
+        // thread.
+        var tags = tags_mod.read(p.gpa, io, path);
+        defer tags.deinit(p.gpa);
+
         const owned_title = if (display_title) |t|
             try p.gpa.dupe(u8, t)
-        else blk: {
-            var tags = tags_mod.read(p.gpa, io, path);
-            defer tags.deinit(p.gpa);
-            break :blk try tags.displayTitle(p.gpa, path);
-        };
+        else
+            try tags.displayTitle(p.gpa, path);
         errdefer p.gpa.free(owned_title);
+
+        const trim: Trim = .{
+            .delay = tags.encoder_delay,
+            .padding = tags.encoder_padding,
+        };
+        // Begin on the first real sample. This is as true of the first track
+        // of a session as it is of a join.
+        if (trim.delay > 0) sound.seekToFrame(trim.delay) catch {};
 
         const fmt = sound.sourceFormat();
         const duration = sound.lengthSeconds();
@@ -142,6 +178,8 @@ pub const Player = struct {
             .sound = sound,
             .path = owned_path,
             .title = owned_title,
+            .trim = trim,
+            .base_src = trim.delay,
             .info = .{
                 .path = owned_path,
                 .title = owned_title,
@@ -189,17 +227,26 @@ pub const Player = struct {
     }
 
     pub fn play(p: *Player) !void {
-        const t = p.current orelse return;
+        if (p.current == null) return;
+        const t = &p.current.?;
         try t.sound.start();
+        t.started_at = p.engine.timeFrames();
         p.state = .playing;
     }
 
     pub fn pause(p: *Player) void {
-        const t = p.current orelse return;
+        if (p.current == null) return;
         if (p.state != .playing) return;
+        const t = &p.current.?;
         // An armed instant is absolute: it would arrive while we sat paused
         // and start the next track over the top of a halted one.
         p.disarmNext();
+        // Bank what has played, so resuming measures from the right place.
+        if (t.started_at) |started| {
+            const now = p.engine.timeFrames();
+            t.base_src += p.toSrcFrames(t.*, now -| started);
+        }
+        t.started_at = null;
         t.sound.stop();
         p.state = .paused;
     }
@@ -213,10 +260,13 @@ pub const Player = struct {
     }
 
     pub fn stop(p: *Player) void {
-        const t = p.current orelse return;
+        if (p.current == null) return;
+        const t = &p.current.?;
         p.disarmNext();
         t.sound.stop();
         t.sound.seekToFrame(t.trim.delay) catch {};
+        t.base_src = t.trim.delay;
+        t.started_at = null;
         p.state = .stopped;
     }
 
@@ -236,14 +286,30 @@ pub const Player = struct {
 
     /// Seconds left of the current track, which is what decides when the next
     /// one is worth loading.
+    ///
+    /// On the engine's clock where it can be, so that the decision to arm and
+    /// the instant armed agree. Falls back to the displayed position when
+    /// there is no clock to go on — a late arm just means an ordinary track
+    /// change, where a misplaced join would be audible.
     pub fn remaining(p: *Player) f32 {
-        const duration = p.info().duration;
+        const t = p.current orelse return 0;
+        const engine_rate = p.engine.sampleRate();
+        if (p.joinFrames(t)) |join| {
+            if (engine_rate > 0) {
+                const now = p.engine.timeFrames();
+                if (join <= now) return 0;
+                const left: f32 = @floatFromInt(join - now);
+                return left / @as(f32, @floatFromInt(engine_rate));
+            }
+        }
+        const duration = t.info.duration;
         if (duration <= 0) return 0;
         return @max(duration - p.position(), 0);
     }
 
     pub fn seekSeconds(p: *Player, secs: f32) void {
-        const t = p.current orelse return;
+        if (p.current == null) return;
+        const t = &p.current.?;
         const rate = p.engine.sampleRate();
         if (rate == 0) return;
         // Seeking moves the end of the track, so any instant computed from
@@ -252,6 +318,8 @@ pub const Player = struct {
         const clamped = std.math.clamp(secs, 0, @max(t.info.duration - 0.05, 0));
         const frame: u64 = @intFromFloat(clamped * @as(f32, @floatFromInt(rate)));
         t.sound.seekToFrame(frame) catch {};
+        t.base_src = frame;
+        t.started_at = if (p.state == .playing) p.engine.timeFrames() else null;
     }
 
     pub fn seekBy(p: *Player, delta: f32) void {
@@ -288,10 +356,16 @@ pub const Player = struct {
         return p.next != null;
     }
 
-    /// The engine frame the current track should hand over at: now, plus
-    /// whatever is left of it. Null when the length is not knowable, which is
-    /// what makes a stream unarmable.
+    /// The engine frame the current track hands over at: where it started,
+    /// plus how long it has to run. Null when that is not knowable, which is
+    /// what makes a stream or a stopped track unarmable.
+    ///
+    /// Everything here is on the engine's own clock — the same clock the
+    /// handover is scheduled against — so the instant is derived from and
+    /// compared with one source of truth. See `Loaded.started_at` for why the
+    /// sound's cursor is not that source.
     fn joinFrames(p: *Player, t: Loaded) ?u64 {
+        const started = t.started_at orelse return null;
         const total = t.sound.lengthFrames();
         if (total == 0) return null;
 
@@ -302,12 +376,20 @@ pub const Player = struct {
         // The encoder's trailing padding is silence, so the successor starts
         // over the top of it rather than after it.
         const end = total -| @as(u64, t.trim.padding);
-        const left_src = end -| t.sound.cursorFrames();
+        if (end <= t.base_src) return null;
 
         // Widened, because frames times a sample rate overflows u64 for a
         // long enough track.
-        const left_engine = @as(u128, left_src) * engine_rate / src_rate;
-        return p.engine.timeFrames() + @as(u64, @intCast(left_engine));
+        const left_engine = @as(u128, end - t.base_src) * engine_rate / src_rate;
+        return started + @as(u64, @intCast(left_engine));
+    }
+
+    /// Convert engine frames to source frames for one track.
+    fn toSrcFrames(p: *Player, t: Loaded, engine_frames: u64) u64 {
+        const src_rate = t.info.sample_rate;
+        const engine_rate = p.engine.sampleRate();
+        if (src_rate == 0 or engine_rate == 0) return 0;
+        return @intCast(@as(u128, engine_frames) * src_rate / engine_rate);
     }
 
     /// Load `path` and schedule it to take over the instant the current track
@@ -331,6 +413,10 @@ pub const Player = struct {
 
         loaded.sound.setStartTimeFrames(join);
         try loaded.sound.start();
+        // Its start is scheduled, so unlike the first track of a session the
+        // successor's own clock origin is known exactly rather than observed.
+        loaded.started_at = join;
+        loaded.base_src = loaded.trim.delay;
 
         // Only now that the successor is certain to play do we tell the
         // outgoing track to stop there. Its stop time *is* the join, so the
@@ -771,4 +857,98 @@ test "a successor that cannot be opened leaves the current track alone" {
     try testing.expectEqual(State.playing, rig.player.state);
     try testing.expect(try rig.level(1024) > 0.3);
     try testing.expectEqualStrings("A", rig.player.info().title);
+}
+
+/// Read tenth-of-a-second blocks until the handover, and report how much
+/// audio went by before it came. Null if it never did.
+fn secondsToHandoff(rig: *Rig, limit: u32) !?f64 {
+    const block: u32 = Rig.rate / 10;
+    var n: u32 = 0;
+    while (n < limit) : (n += 1) {
+        _ = try rig.level(block);
+        if (rig.player.consumeHandoff()) return (@as(f64, @floatFromInt(n)) + 1) * 0.1;
+    }
+    return null;
+}
+
+/// Two two-second tones, the first playing.
+fn twoTracks(rig: *Rig) !struct { a: []u8, b: []u8 } {
+    const two: u32 = Rig.rate * 2;
+    try rig.writeTone("a.wav", two, 440);
+    try rig.writeTone("b.wav", two, 660);
+    const a_path = try rig.path("a.wav");
+    errdefer rig.gpa.free(a_path);
+    const b_path = try rig.path("b.wav");
+    errdefer rig.gpa.free(b_path);
+
+    rig.player.setVolume(1.0);
+    try rig.player.open(testing.io, a_path, "A");
+    try rig.player.play();
+    return .{ .a = a_path, .b = b_path };
+}
+
+test "a join armed after a seek is measured from where the seek left the track" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const paths = try twoTracks(&rig);
+    defer rig.gpa.free(paths.a);
+    defer rig.gpa.free(paths.b);
+
+    _ = try rig.level(Rig.rate / 10);
+    rig.player.seekSeconds(1.5);
+    try rig.player.armNext(testing.io, paths.b, "B");
+
+    // Half a second of track left, so the handover is half a second away.
+    // Computed from the seek, not from however much has been played.
+    const took = (try secondsToHandoff(&rig, 40)) orelse return error.TestUnexpectedResult;
+    try testing.expectApproxEqAbs(@as(f64, 0.5), took, 0.15);
+}
+
+test "pausing banks what has played, so a join armed after resuming is right" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const paths = try twoTracks(&rig);
+    defer rig.gpa.free(paths.a);
+    defer rig.gpa.free(paths.b);
+
+    // Half a second in, then stop for a while. The engine's clock keeps
+    // running while paused, which is exactly what the bookkeeping has to
+    // survive: a join measured from the clock alone would come out a second
+    // early, and one measured from the start of the track half a second late.
+    _ = try rig.level(Rig.rate / 2);
+    rig.player.pause();
+    for (0..10) |_| _ = try rig.level(Rig.rate / 10);
+    try rig.player.play();
+
+    try rig.player.armNext(testing.io, paths.b, "B");
+    const took = (try secondsToHandoff(&rig, 40)) orelse return error.TestUnexpectedResult;
+    try testing.expectApproxEqAbs(@as(f64, 1.5), took, 0.15);
+}
+
+/// How long the handover takes to arrive when the outgoing track declares
+/// `padding` samples of encoder silence at its tail.
+fn joinWithPadding(padding: u32) !f64 {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const paths = try twoTracks(&rig);
+    defer rig.gpa.free(paths.a);
+    defer rig.gpa.free(paths.b);
+
+    _ = try rig.level(Rig.rate / 10);
+    // A WAV has no encoder gap of its own, so it is declared here. What is
+    // under test is the arithmetic, which is all the format affects.
+    rig.player.current.?.trim.padding = padding;
+    try rig.player.armNext(testing.io, paths.b, "B");
+
+    return (try secondsToHandoff(&rig, 60)) orelse error.TestUnexpectedResult;
+}
+
+test "the successor comes in where the padding starts, not at the end of the file" {
+    const plain = try joinWithPadding(0);
+    const padded = try joinWithPadding(Rig.rate / 2);
+
+    // Half a second of declared padding brings the handover half a second
+    // earlier, because that half second is silence the encoder added and the
+    // next track plays over it rather than after it.
+    try testing.expectApproxEqAbs(@as(f64, 0.5), plain - padded, 0.15);
 }

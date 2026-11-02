@@ -71,24 +71,24 @@ const key_lines = [_][]const u8{
 const feature_lines = [_][]const u8{
     "FORMATS",
     "  mp3, flac and wav, through miniaudio's own decoders.",
-    "  no ogg, opus or aac.",
     "TAGS",
     "  id3v2.2 / 2.3 / 2.4 and vorbis comments, read at scan time,",
     "  so titles and lengths are there before anything plays.",
     "PLAYLIST",
-    "  recursive scan; m3u, m3u8 and pls read and written;",
-    "  reorder, shuffle, repeat off / all / one.  drag the",
-    "  scrollbar in the right-hand border.  f groups by folder.",
+    "  recursive scan; m3u/m3u8/pls read and written; reorder,",
+    "  shuffle, repeat; f groups by folder; scrollbar in the border.",
+    "GAPLESS",
+    "  the next track starts on the engine's clock at the instant",
+    "  the last one stops, and mp3 encoder padding is skipped.",
     "VISUALIZER AND EQUALIZER",
     "  a windowed fft spectrum with falling peak caps, or an",
-    "  oscilloscope at half-block resolution.  g cycles them.",
-    "  ten bands at winamp's frequencies, +/- 12 dB, and a preamp.",
-    "  the sliders resolve a third of a dB, shown in the titlebar.",
+    "  oscilloscope.  g cycles them.  ten bands at winamp's",
+    "  frequencies, +/- 12 dB, resolving a third of a dB each.",
     "THEMES",
     "  palette and glyphs in a zon file.  ctrl+p lists the built-ins",
     "  and whatever is in ~/.config/tuiamp/themes/, previewing live.",
     "NOT YET",
-    "  no gapless, no network streams, no double-size mode.",
+    "  no ogg/opus/aac, no network streams, no double-size mode.",
 };
 
 /// Winamp's own boast, which has to be in here somewhere.
@@ -254,9 +254,10 @@ test "the features page names the things a keymap cannot tell you" {
     try testing.expect(std.mem.indexOf(u8, text, "recursive") != null);
     try testing.expect(std.mem.indexOf(u8, text, "id3v2") != null);
     try testing.expect(std.mem.indexOf(u8, text, "vorbis comments") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "GAPLESS") != null);
     // And the gaps, which are deliberate and so are stated rather than hidden.
     try testing.expect(std.mem.indexOf(u8, text, "NOT YET") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "gapless") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "network streams") != null);
     try testing.expect(std.mem.indexOf(u8, text, "2/2") != null);
 
     for (0..s.rows) |y| {
