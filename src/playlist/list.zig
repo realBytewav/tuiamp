@@ -179,6 +179,30 @@ pub const List = struct {
         return null;
     }
 
+    /// What `advance` would return, without moving. Null means there is
+    /// nothing predictable to play next: either playback is over, or the
+    /// shuffled order is about to be thrown away and rebuilt, which is the one
+    /// case a peek cannot see through.
+    ///
+    /// This exists so playback can load the next track *before* the current
+    /// one ends. It must mirror `advance` branch for branch, so the two are
+    /// tested against each other.
+    pub fn peekNext(l: *const List) ?usize {
+        if (l.isEmpty() or l.order.items.len == 0) return null;
+        if (l.repeat == .one) return l.currentIndex();
+
+        if (l.order_pos + 1 < l.order.items.len) return l.order.items[l.order_pos + 1];
+
+        if (l.repeat == .all) {
+            // `advance` reshuffles on the wrap, so the entry that will come
+            // next does not exist yet. Declining to guess costs one ordinary
+            // track change per time round a shuffled playlist.
+            if (l.shuffle) return null;
+            return l.order.items[0];
+        }
+        return null;
+    }
+
     pub fn retreat(l: *List) ?usize {
         if (l.isEmpty()) return null;
         if (l.repeat == .one) return l.currentIndex();
@@ -600,4 +624,95 @@ test "setTitle replaces owned memory without leaking" {
     try l.setTitle(0, "A Much Longer Title Than Before");
     try testing.expectEqualStrings("A Much Longer Title Than Before", l.entries.items[0].title);
     try l.setTitle(99, "ignored");
+}
+
+/// Walk a list to the end and back round, asserting at every step that the
+/// peek said what the advance then did. Loading the next track early is only
+/// safe if the two cannot disagree.
+fn expectPeekMatchesAdvance(l: *List, steps: usize) !void {
+    for (0..steps) |_| {
+        const peeked = l.peekNext();
+        const advanced = l.advance();
+        if (peeked) |p| {
+            try testing.expectEqual(@as(?usize, p), advanced);
+        }
+    }
+}
+
+test "peekNext says what advance will do, playing in order" {
+    var l = try makeList(4);
+    defer l.deinit();
+
+    try testing.expectEqual(@as(?usize, 1), l.peekNext());
+    // Peeking does not move.
+    try testing.expectEqual(@as(?usize, 1), l.peekNext());
+    try testing.expectEqual(@as(?usize, 0), l.currentIndex());
+
+    try expectPeekMatchesAdvance(&l, 3);
+    // Off the end with repeat off: nothing to load next.
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+}
+
+test "peekNext follows repeat and wraps with it" {
+    var l = try makeList(3);
+    defer l.deinit();
+
+    l.repeat = .one;
+    try testing.expectEqual(@as(?usize, 0), l.peekNext());
+
+    l.repeat = .all;
+    _ = l.advance();
+    _ = l.advance();
+    try testing.expectEqual(@as(?usize, 2), l.currentIndex());
+    // The wrap is predictable while the order is not being reshuffled.
+    try testing.expectEqual(@as(?usize, 0), l.peekNext());
+    try expectPeekMatchesAdvance(&l, 7);
+}
+
+test "peekNext follows the shuffled order, not the entry order" {
+    var l = try makeList(8);
+    defer l.deinit();
+    l.setShuffle(true);
+
+    // Seven steps is the whole permutation, so this covers every position in
+    // it rather than just the first.
+    try expectPeekMatchesAdvance(&l, 7);
+}
+
+test "peekNext declines the one join it cannot predict" {
+    var l = try makeList(4);
+    defer l.deinit();
+    l.setShuffle(true);
+    l.repeat = .all;
+
+    // Up to the last entry of the permutation, it knows.
+    try expectPeekMatchesAdvance(&l, 3);
+    // On the wrap, `advance` throws the permutation away and builds another,
+    // so the entry that comes next does not exist to be peeked at. Declining
+    // costs one ordinary track change per time round.
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+    try testing.expect(l.advance() != null);
+    // And it picks straight back up afterwards.
+    try testing.expect(l.peekNext() != null);
+}
+
+test "an empty list has nothing to peek at" {
+    var l = List.init(testing.allocator, 1);
+    defer l.deinit();
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+    l.repeat = .all;
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+    l.repeat = .one;
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+}
+
+test "a single entry only has a successor when repeating" {
+    var l = try makeList(1);
+    defer l.deinit();
+
+    try testing.expectEqual(@as(?usize, null), l.peekNext());
+    l.repeat = .all;
+    try testing.expectEqual(@as(?usize, 0), l.peekNext());
+    l.repeat = .one;
+    try testing.expectEqual(@as(?usize, 0), l.peekNext());
 }

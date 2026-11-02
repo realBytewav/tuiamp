@@ -134,6 +134,16 @@ pub const App = struct {
     eq_cursor: usize = 0,
     playlist_open: bool = false,
     playlist_scroll: usize = 0,
+    /// Which entry the player has armed to play next, so the playlist can be
+    /// moved onto it once the audio thread has made the join. The player owns
+    /// whether anything is armed at all — `hasNextArmed` is the truth and this
+    /// follows it — so a disarm we did not initiate cannot leave the two
+    /// disagreeing.
+    armed_index: ?usize = null,
+    /// Set once the current track has had its one go at arming a successor,
+    /// so an unreadable next file is not reopened on every frame. Cleared
+    /// whenever we are far enough from the end to be outside the window.
+    arm_tried: bool = false,
     /// The playlist grouped by folder, and whether that grouping is what is
     /// on screen. In folder mode the window's rows are these rows rather
     /// than entries, so `folder_cursor` is what the user is pointing at and
@@ -335,11 +345,33 @@ pub const App = struct {
     fn tick(a: *App) void {
         a.frames +%= 1;
 
+        // A join that was armed has already happened in the audio thread, so
+        // this only catches the playlist up. It is checked first because the
+        // outgoing track has ended in both cases, and only one of them wants
+        // a file opened.
+        if (a.player.consumeHandoff()) {
+            // `jumpTo`, not `advance`: the armed entry is already being heard,
+            // so the list has to be moved onto it. `advance` could pick
+            // something else and leave the marker on a different track from
+            // the audio. The duration is recorded afterwards, once the list
+            // and the player agree on which entry is playing.
+            if (a.armed_index) |index| _ = a.list.jumpTo(index);
+            a.armed_index = null;
+            a.arm_tried = false;
+            a.rememberDuration();
+            a.marquee.reset();
+            // Deliberately no `a.tap.reset()`: the audio ran straight through,
+            // so clearing the visualizer's ring would blank the analyzer
+            // across a join for no reason.
+        }
+
         if (a.player.consumeTrackEnded()) {
             // Record what we learned about this track before moving on.
             a.rememberDuration();
             a.step(.forward);
         }
+
+        a.maybeArmNext();
 
         if (a.player.state == .playing) {
             const avail = main_window.Layout.compute().marquee.w -| 4;
@@ -358,8 +390,8 @@ pub const App = struct {
         const have = a.player.state == .playing and a.tap.readLatest(a.vis_window);
         const samples: []const f32 = if (have) a.vis_window else &.{};
 
-        const rate = if (a.player.info.sample_rate > 0)
-            a.player.info.sample_rate
+        const rate = if (a.player.info().sample_rate > 0)
+            a.player.info().sample_rate
         else
             a.player.engine.sampleRate();
 
@@ -368,14 +400,76 @@ pub const App = struct {
 
     fn currentTitle(a: *App) []const u8 {
         if (!a.player.hasTrack()) return "tuiamp";
-        return a.player.info.title;
+        return a.player.info().title;
     }
 
     /// Fill in a duration the playlist did not know, now that the decoder
     /// has told us. This is why durations can be left unknown at scan time.
     fn rememberDuration(a: *App) void {
         const idx = a.list.currentIndex() orelse return;
-        if (a.player.info.duration > 0) a.list.setDuration(idx, a.player.info.duration);
+        if (a.player.info().duration > 0) a.list.setDuration(idx, a.player.info().duration);
+    }
+
+    /// How far ahead of the end of a track its successor is loaded. Long
+    /// enough that opening a file and initialising a decoder has no deadline;
+    /// short enough that the sample-rate conversion inside the join is over
+    /// seconds rather than minutes, which is what keeps its rounding error
+    /// inaudible.
+    const preload_lead: f32 = 5;
+
+    /// Load and schedule whatever comes next, once the current track is close
+    /// enough to its end to be sure of what that is.
+    fn maybeArmNext(a: *App) void {
+        // The player drops an armed successor by itself whenever something
+        // invalidates the instant it was scheduled for — a pause, a stop, a
+        // seek. So it is the authority on whether anything is armed, and this
+        // index follows it rather than the other way round.
+        if (!a.player.hasNextArmed()) a.armed_index = null;
+        if (a.armed_index != null) return;
+        if (a.player.state != .playing) return;
+
+        // A track the decoder cannot measure has no end to schedule against.
+        if (a.player.info().duration <= 0) return;
+
+        if (a.player.remaining() > preload_lead) {
+            a.arm_tried = false;
+            return;
+        }
+        if (a.arm_tried) return;
+        a.arm_tried = true;
+
+        const next = a.list.peekNext() orelse return;
+        if (next >= a.list.len()) return;
+        const entry = a.list.entries.items[next];
+        // Failure just means this one join is an ordinary track change.
+        a.player.armNext(a.io, entry.path, entry.title) catch return;
+        a.armed_index = next;
+    }
+
+    /// Give up on the armed successor, for the things the player cannot see
+    /// for itself: the playlist changing under it, or the order it will be
+    /// read in changing.
+    fn disarmNext(a: *App) void {
+        a.player.disarmNext();
+        a.armed_index = null;
+        a.arm_tried = false;
+    }
+
+    /// Both of these change which entry comes next, so the armed one — if it
+    /// is no longer that entry — has to go. They live here rather than inline
+    /// at the key and the mouse button, so the two paths cannot drift.
+    fn toggleShuffle(a: *App) void {
+        a.list.setShuffle(!a.list.shuffle);
+        a.disarmNext();
+    }
+
+    fn cycleRepeat(a: *App) void {
+        a.list.repeat = switch (a.list.repeat) {
+            .off => .all,
+            .all => .one,
+            .one => .off,
+        };
+        a.disarmNext();
     }
 
     const Direction = enum { forward, backward };
@@ -406,11 +500,13 @@ pub const App = struct {
         // The playlist already knows the display title, so the marquee and
         // the list never disagree about what is playing.
         a.player.open(a.io, entry.path, entry.title) catch return false;
+        a.armed_index = null;
+        a.arm_tried = false;
         a.marquee.reset();
         a.tap.reset();
 
         // The decoder knows the real duration; the playlist may not.
-        if (a.player.info.duration > 0) a.list.setDuration(index, a.player.info.duration);
+        if (a.player.info().duration > 0) a.list.setDuration(index, a.player.info().duration);
         return true;
     }
 
@@ -528,12 +624,8 @@ pub const App = struct {
                 'v' => p.stop(),
                 'b' => a.step(.forward),
                 ' ' => p.togglePause() catch {},
-                's' => a.list.setShuffle(!a.list.shuffle),
-                'r' => a.list.repeat = switch (a.list.repeat) {
-                    .off => .all,
-                    .all => .one,
-                    .one => .off,
-                },
+                's' => a.toggleShuffle(),
+                'r' => a.cycleRepeat(),
                 't' => a.show_remaining = !a.show_remaining,
                 'w' => a.shaded = !a.shaded,
                 // Cycle the analyzer: spectrum, oscilloscope, off.
@@ -581,6 +673,9 @@ pub const App = struct {
     /// calls this; the rebuild itself happens once, before the next frame.
     fn touchPlaylist(a: *App) void {
         a.folders_stale = true;
+        // Every list edit comes through here, and any of them can change
+        // which entry follows the one playing.
+        a.disarmNext();
     }
 
     /// Bring the grouping up to date if it is both wanted and stale. The
@@ -1227,12 +1322,8 @@ pub const App = struct {
             .play => a.player.play() catch {},
             .pause => a.player.pause(),
             .stop => a.player.stop(),
-            .shuffle => a.list.setShuffle(!a.list.shuffle),
-            .repeat => a.list.repeat = switch (a.list.repeat) {
-                .off => .all,
-                .all => .one,
-                .one => .off,
-            },
+            .shuffle => a.toggleShuffle(),
+            .repeat => a.cycleRepeat(),
             .eq => a.toggleEq(),
             .playlist => a.togglePlaylist(),
             .seek => |v| {
@@ -1508,7 +1599,7 @@ pub const App = struct {
         const p = a.player;
         const pos = p.position();
         const clock: u32 = if (a.show_remaining)
-            @intFromFloat(@max(p.info.duration - pos, 0))
+            @intFromFloat(@max(p.info().duration - pos, 0))
         else
             @intFromFloat(@max(pos, 0));
 
@@ -1522,9 +1613,9 @@ pub const App = struct {
             .progress = p.progress(),
             .volume = p.volume,
             .balance = p.balance,
-            .kbps = p.info.kbps,
-            .sample_rate = p.info.sample_rate,
-            .channels = p.info.channels,
+            .kbps = p.info().kbps,
+            .sample_rate = p.info().sample_rate,
+            .channels = p.info().channels,
             .shuffle = a.list.shuffle,
             .repeat = a.list.repeat != .off,
             .eq_open = a.eq_open,

@@ -232,6 +232,14 @@ pub const Engine = struct {
         return c.ma_engine_get_sample_rate(&self.raw);
     }
 
+    /// The engine's global frame counter, which scheduled start and stop
+    /// times are measured against. It advances as audio is read, so on an
+    /// engine built by `initCapture` it moves only when `read` is called —
+    /// which is what makes a scheduled handover testable.
+    pub fn timeFrames(self: *Engine) u64 {
+        return c.ma_engine_get_time_in_pcm_frames(&self.raw);
+    }
+
     pub fn channels(self: *Engine) u32 {
         return c.ma_engine_get_channels(&self.raw);
     }
@@ -389,6 +397,28 @@ pub const Sound = struct {
         return secs;
     }
 
+    /// Schedule the sound to begin at an absolute time on the engine clock.
+    /// Starting is still explicit — `start` must be called as well — and the
+    /// sound stays silent until the instant arrives.
+    pub fn setStartTimeFrames(self: *Sound, frame: u64) void {
+        c.ma_sound_set_start_time_in_pcm_frames(&self.raw, frame);
+    }
+
+    /// Schedule the sound to fall silent at an absolute time on the engine
+    /// clock, whether or not its data source has run out.
+    pub fn setStopTimeFrames(self: *Sound, frame: u64) void {
+        c.ma_sound_set_stop_time_in_pcm_frames(&self.raw, frame);
+    }
+
+    /// Back to unscheduled: audible from the moment it is started until the
+    /// data source runs dry. These are miniaudio's own defaults for a fresh
+    /// node — `ma_node_base.stateTimes` is initialised to zero for started
+    /// and to all-ones for stopped — rather than values of our choosing.
+    pub fn clearSchedule(self: *Sound) void {
+        self.setStartTimeFrames(0);
+        self.setStopTimeFrames(std.math.maxInt(u64));
+    }
+
     /// 0.0 .. 1.0, applied per-sound so the engine volume stays the master.
     pub fn setVolume(self: *Sound, v: f32) void {
         c.ma_sound_set_volume(&self.raw, v);
@@ -422,56 +452,8 @@ pub const Format = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-
-/// A small stereo WAV of full-scale sine, written to `dir`.
-fn writeToneWav(io: std.Io, dir: std.Io.Dir, name: []const u8, frames: u32, rate: u32) !void {
-    const gpa = testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-
-    const data_len: u32 = frames * 2 * 2; // stereo, 16-bit
-    var u32buf: [4]u8 = undefined;
-    var u16buf: [2]u8 = undefined;
-
-    try out.appendSlice(gpa, "RIFF");
-    std.mem.writeInt(u32, &u32buf, 36 + data_len, .little);
-    try out.appendSlice(gpa, &u32buf);
-    try out.appendSlice(gpa, "WAVEfmt ");
-    std.mem.writeInt(u32, &u32buf, 16, .little);
-    try out.appendSlice(gpa, &u32buf);
-    std.mem.writeInt(u16, &u16buf, 1, .little);
-    try out.appendSlice(gpa, &u16buf);
-    std.mem.writeInt(u16, &u16buf, 2, .little);
-    try out.appendSlice(gpa, &u16buf);
-    std.mem.writeInt(u32, &u32buf, rate, .little);
-    try out.appendSlice(gpa, &u32buf);
-    std.mem.writeInt(u32, &u32buf, rate * 4, .little);
-    try out.appendSlice(gpa, &u32buf);
-    std.mem.writeInt(u16, &u16buf, 4, .little);
-    try out.appendSlice(gpa, &u16buf);
-    std.mem.writeInt(u16, &u16buf, 16, .little);
-    try out.appendSlice(gpa, &u16buf);
-    try out.appendSlice(gpa, "data");
-    std.mem.writeInt(u32, &u32buf, data_len, .little);
-    try out.appendSlice(gpa, &u32buf);
-
-    for (0..frames) |i| {
-        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rate));
-        const v: i16 = @intFromFloat(@sin(2.0 * std.math.pi * 440.0 * t) * 30000);
-        std.mem.writeInt(i16, &u16buf, v, .little);
-        try out.appendSlice(gpa, &u16buf);
-        try out.appendSlice(gpa, &u16buf);
-    }
-
-    try dir.writeFile(io, .{ .sub_path = name, .data = out.items });
-}
-
-fn rms(samples: []const f32) f32 {
-    if (samples.len == 0) return 0;
-    var sum: f64 = 0;
-    for (samples) |v| sum += @as(f64, v) * @as(f64, v);
-    return @floatCast(@sqrt(sum / @as(f64, @floatFromInt(samples.len))));
-}
+const tone = @import("tone.zig");
+const rms = tone.rms;
 
 /// Build the real chain — sound into EQ into tap into endpoint — and read
 /// what a sound card would have been handed.
@@ -490,7 +472,7 @@ const Capture = struct {
 
         var tmp = testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        try writeToneWav(io, tmp.dir, "tone.wav", rate, rate);
+        try tone.writeWav(gpa, io, tmp.dir, "tone.wav", .{ .frames = rate, .rate = rate });
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
         const path = try std.fs.path.joinZ(gpa, &.{ root, "tone.wav" });

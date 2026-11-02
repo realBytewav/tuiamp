@@ -14,6 +14,7 @@ comptime {
     _ = @import("meta/text.zig");
     _ = @import("ui/widgets/vis.zig");
     _ = @import("audio/tap.zig");
+    _ = @import("audio/tone.zig");
     _ = @import("audio/fft.zig");
     _ = @import("ui/fmt.zig");
     _ = @import("ui/playlist_window.zig");
